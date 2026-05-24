@@ -1,0 +1,541 @@
+"""
+LLM HTTP layer (no SDK).
+
+Functions:
+  generate / generate_with_vision  — Gemini, single-shot
+  openai_generate                  — OpenAI Chat Completions, single-shot
+  gemini_generate_stream           — Gemini streamGenerateContent (reasoning + answer parts)
+  openai_generate_stream           — OpenAI Responses API (reasoning_summary + output streaming)
+
+Streaming functions yield: {"type": "reasoning"|"answer", "delta": str}
+
+Middleware:
+  - `@with_logging` records every (non-stream) call to logs/llm_calls.jsonl.
+    Set LLM_LOG_FULL=1 to log full content (no truncation).
+  - Stream functions log inline once the iterator is exhausted.
+"""
+import asyncio
+import base64
+import hashlib
+import json
+import os
+import time
+from datetime import datetime, timezone
+from functools import wraps
+from pathlib import Path
+from typing import AsyncIterator
+
+import httpx
+
+_BASE = "https://generativelanguage.googleapis.com/v1beta"
+_OPENAI_BASE = "https://api.openai.com/v1"
+_TIMEOUT = 120
+
+_LOG_PATH = Path(__file__).parent / "logs" / "llm_calls.jsonl"
+_LOG_FULL = os.environ.get("LLM_LOG_FULL", "0") == "1"
+_PREVIEW_CHARS = 300
+
+
+def _api_key() -> str:
+    key = os.environ.get("GOOGLE_API_KEY", "")
+    if not key:
+        raise RuntimeError("GOOGLE_API_KEY not set")
+    return key
+
+
+def _openai_key() -> str:
+    key = os.environ.get("OPENAI_API_KEY", "")
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY not set")
+    return key
+
+
+def _history_to_contents(history: list) -> list:
+    result = []
+    for msg in history:
+        role = "model" if msg["role"] == "assistant" else "user"
+        result.append({"role": role, "parts": [{"text": msg["content"]}]})
+    return result
+
+
+def _preview(s: str | None) -> str | None:
+    if s is None or _LOG_FULL:
+        return s
+    if len(s) <= _PREVIEW_CHARS:
+        return s
+    return s[:_PREVIEW_CHARS] + f"... [+{len(s) - _PREVIEW_CHARS} chars]"
+
+
+def _append_log(entry: dict) -> None:
+    _LOG_PATH.parent.mkdir(exist_ok=True)
+    with _LOG_PATH.open("a") as f:
+        f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+
+
+# ─── Gemini cachedContents: indexing-time prefix caching ──────────────────────
+# LightRAG sends the same entity_extraction system_prompt 200+ times during
+# indexing. We cache it once and reference by name → 75% discount on cached
+# tokens.
+
+_GEMINI_CACHE_TTL_SECS = 3600  # 1h — longer than typical indexing run
+_GEMINI_CACHE_MIN_CHARS = 4000  # ~1000 tokens; below this Gemini rejects caching
+_gemini_cache_registry: dict[str, tuple[str, float]] = {}  # hash → (name, expiry_epoch)
+_gemini_cache_locks: dict[str, asyncio.Lock] = {}
+
+
+async def _ensure_gemini_cache(model: str, system_prompt: str) -> str | None:
+    """Return 'cachedContents/...' name, creating cache if needed.
+
+    Returns None if the prompt is too small to cache or creation failed.
+    Thread-safe across concurrent indexing calls via per-hash asyncio lock.
+    """
+    if not system_prompt or len(system_prompt) < _GEMINI_CACHE_MIN_CHARS:
+        return None
+
+    key = hashlib.sha256(f"{model}|{system_prompt}".encode()).hexdigest()
+
+    lock = _gemini_cache_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        now = time.time()
+        entry = _gemini_cache_registry.get(key)
+        if entry and entry[1] > now + 60:  # ≥1min remaining
+            return entry[0]
+
+        body = {
+            "model": f"models/{model}",
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "ttl": f"{_GEMINI_CACHE_TTL_SECS}s",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    f"{_BASE}/cachedContents",
+                    params={"key": _api_key()},
+                    json=body,
+                )
+                if resp.status_code >= 400:
+                    # Too small / unsupported model / quota: fall back silently
+                    _append_log({
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "fn": "_ensure_gemini_cache",
+                        "model": model,
+                        "status": "skip",
+                        "reason": f"{resp.status_code}: {resp.text[:200]}",
+                    })
+                    return None
+                name = resp.json()["name"]
+        except Exception as e:
+            _append_log({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "fn": "_ensure_gemini_cache",
+                "model": model,
+                "status": "error",
+                "error": f"{type(e).__name__}: {e}",
+            })
+            return None
+
+        _gemini_cache_registry[key] = (name, now + _GEMINI_CACHE_TTL_SECS)
+        _append_log({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "fn": "_ensure_gemini_cache",
+            "model": model,
+            "status": "created",
+            "cache_name": name,
+            "system_prompt_chars": len(system_prompt),
+        })
+        return name
+
+
+def _log_call(
+    fn_name: str,
+    model: str,
+    prompt: str | None,
+    response_text: str | None,
+    usage: dict | None,
+    elapsed: float,
+    status: str,
+    error: str | None = None,
+    extra: dict | None = None,
+) -> None:
+    """Unified per-call log entry. Captures provider usage stats for cache analysis."""
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "fn": fn_name,
+        "model": model,
+        "prompt": _preview(prompt),
+        "prompt_chars": len(prompt) if isinstance(prompt, str) else None,
+        "response": _preview(response_text),
+        "response_chars": len(response_text) if isinstance(response_text, str) else None,
+        "usage": usage,
+        "elapsed_s": round(elapsed, 3),
+        "status": status,
+    }
+    if error:
+        entry["error"] = error
+    if extra:
+        entry.update(extra)
+    _append_log(entry)
+
+
+def with_logging(fn):
+    """Middleware: log request/response + elapsed time to JSONL.
+
+    Designed to compose with other middlewares (retry, cache, metrics) by
+    stacking decorators. Closest decorator runs innermost.
+    """
+    @wraps(fn)
+    async def wrapper(*args, **kwargs):
+        model = kwargs.get("model") if "model" in kwargs else (args[0] if args else None)
+        prompt = kwargs.get("prompt") if "prompt" in kwargs else (args[1] if len(args) > 1 else None)
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "fn": fn.__name__,
+            "model": model,
+            "prompt": _preview(prompt),
+            "prompt_chars": len(prompt) if isinstance(prompt, str) else None,
+        }
+        t0 = time.monotonic()
+        try:
+            response = await fn(*args, **kwargs)
+        except Exception as e:
+            entry["status"] = "error"
+            entry["error"] = f"{type(e).__name__}: {e}"
+            entry["elapsed_s"] = round(time.monotonic() - t0, 3)
+            _append_log(entry)
+            raise
+        entry["status"] = "ok"
+        entry["response"] = _preview(response)
+        entry["response_chars"] = len(response) if isinstance(response, str) else None
+        entry["elapsed_s"] = round(time.monotonic() - t0, 3)
+        _append_log(entry)
+        return response
+
+    return wrapper
+
+
+async def generate(
+    model: str,
+    prompt: str,
+    system_prompt: str | None = None,
+    history: list | None = None,
+    temperature: float = 0.7,
+    thinking_budget: int | None = None,
+) -> str:
+    """Non-streaming Gemini call.
+
+    thinking_budget: int | None
+        None  → Gemini default (thinking enabled, dynamic budget)
+        0     → disable thinking (faster, cheaper; use for deterministic structured tasks)
+        N     → cap at N tokens
+    """
+    contents = _history_to_contents(history or [])
+    contents.append({"role": "user", "parts": [{"text": prompt}]})
+
+    gen_cfg: dict = {"temperature": temperature}
+    if thinking_budget is not None:
+        gen_cfg["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+
+    body: dict = {"contents": contents, "generationConfig": gen_cfg}
+
+    # If system_prompt is long+stable, reference cached content instead of inlining.
+    # On cache hit, the cached tokens are billed at ~25% rate (75% discount).
+    cache_name = await _ensure_gemini_cache(model, system_prompt) if system_prompt else None
+    if cache_name:
+        body["cachedContent"] = cache_name  # cache contains systemInstruction
+    elif system_prompt:
+        body["system_instruction"] = {"parts": [{"text": system_prompt}]}
+
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(
+                f"{_BASE}/models/{model}:generateContent",
+                params={"key": _api_key()},
+                json=body,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            usage = data.get("usageMetadata")
+    except Exception as e:
+        _log_call("generate", model, prompt, None, None, time.monotonic() - t0,
+                  "error", f"{type(e).__name__}: {e}")
+        raise
+    _log_call("generate", model, prompt, text, usage, time.monotonic() - t0, "ok")
+    return text
+
+
+async def generate_with_vision(
+    model: str,
+    prompt: str,
+    images: list | None = None,
+    system_prompt: str | None = None,
+    raw_messages: list | None = None,
+) -> str:
+    """
+    Generate with optional images.
+    images: list of data-URIs or local file paths.
+    raw_messages: pre-formatted list (OpenAI format) — converted to Gemini contents.
+    """
+    if raw_messages:
+        contents = []
+        for msg in raw_messages:
+            if msg is None:
+                continue
+            role = "model" if msg.get("role") == "assistant" else "user"
+            raw_content = msg.get("content", "")
+            if isinstance(raw_content, str):
+                parts = [{"text": raw_content}]
+            else:
+                parts = []
+                for block in raw_content:
+                    if block.get("type") == "text":
+                        parts.append({"text": block["text"]})
+                    elif block.get("type") == "image_url":
+                        url = block["image_url"]["url"]
+                        if url.startswith("data:"):
+                            header, data = url.split(",", 1)
+                            mime = header.split(":")[1].split(";")[0]
+                            parts.append({"inline_data": {"mime_type": mime, "data": data}})
+            contents.append({"role": role, "parts": parts})
+    else:
+        parts = [{"text": prompt}]
+        for img in images or []:
+            if isinstance(img, str) and img.startswith("data:"):
+                header, data = img.split(",", 1)
+                mime = header.split(":")[1].split(";")[0]
+                parts.append({"inline_data": {"mime_type": mime, "data": data}})
+            elif isinstance(img, (str, Path)) and Path(img).exists():
+                raw = Path(img).read_bytes()
+                parts.append({
+                    "inline_data": {
+                        "mime_type": "image/png",
+                        "data": base64.b64encode(raw).decode(),
+                    }
+                })
+        contents = [{"role": "user", "parts": parts}]
+
+    body: dict = {"contents": contents}
+    if system_prompt:
+        body["system_instruction"] = {"parts": [{"text": system_prompt}]}
+
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(
+                f"{_BASE}/models/{model}:generateContent",
+                params={"key": _api_key()},
+                json=body,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            usage = data.get("usageMetadata")
+    except Exception as e:
+        _log_call("generate_with_vision", model, prompt, None, None,
+                  time.monotonic() - t0, "error", f"{type(e).__name__}: {e}",
+                  extra={"images": len(images) if images else 0})
+        raise
+    _log_call("generate_with_vision", model, prompt, text, usage,
+              time.monotonic() - t0, "ok",
+              extra={"images": len(images) if images else 0})
+    return text
+
+
+async def openai_generate(
+    model: str,
+    prompt: str,
+    system_prompt: str | None = None,
+    temperature: float | None = None,
+) -> str:
+    """OpenAI Chat Completions via raw HTTP (no SDK).
+
+    Reserved for final answer synthesis (high-reasoning model) — separated
+    from Gemini calls so we can route by step: cheap Gemini for KG/keywords,
+    high-reasoning OpenAI for the final user-facing response.
+    """
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    body: dict = {"model": model, "messages": messages}
+    if temperature is not None:
+        body["temperature"] = temperature  # reasoning models (gpt-5*, o-series) reject this
+
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=300) as client:  # reasoning models can be slow
+            resp = await client.post(
+                f"{_OPENAI_BASE}/chat/completions",
+                headers={"Authorization": f"Bearer {_openai_key()}"},
+                json=body,
+            )
+            if resp.status_code >= 400:
+                raise RuntimeError(f"OpenAI {resp.status_code}: {resp.text}")
+            data = resp.json()
+            text = data["choices"][0]["message"]["content"]
+            usage = data.get("usage")
+    except Exception as e:
+        _log_call("openai_generate", model, prompt, None, None,
+                  time.monotonic() - t0, "error", f"{type(e).__name__}: {e}")
+        raise
+    _log_call("openai_generate", model, prompt, text, usage,
+              time.monotonic() - t0, "ok")
+    return text
+
+
+async def _log_stream_summary(fn_name: str, model: str, prompt: str | None,
+                              reasoning_buf: list, answer_buf: list,
+                              elapsed: float, status: str,
+                              usage: dict | None = None,
+                              error: str | None = None) -> None:
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "fn": fn_name,
+        "model": model,
+        "prompt": _preview(prompt),
+        "prompt_chars": len(prompt) if isinstance(prompt, str) else None,
+        "reasoning": _preview("".join(reasoning_buf)),
+        "reasoning_chars": sum(len(c) for c in reasoning_buf),
+        "answer": _preview("".join(answer_buf)),
+        "answer_chars": sum(len(c) for c in answer_buf),
+        "usage": usage,
+        "elapsed_s": round(elapsed, 3),
+        "status": status,
+    }
+    if error:
+        entry["error"] = error
+    _append_log(entry)
+
+
+async def gemini_generate_stream(
+    model: str,
+    prompt: str,
+    system_prompt: str | None = None,
+    include_thoughts: bool = True,
+    thinking_budget: int = -1,
+) -> AsyncIterator[dict]:
+    """Stream Gemini response with thought parts (reasoning) + answer parts.
+
+    Yields: {"type": "reasoning"|"answer", "delta": str}
+    """
+    body: dict = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "thinkingConfig": {
+                "includeThoughts": include_thoughts,
+                "thinkingBudget": thinking_budget,
+            }
+        },
+    }
+    if system_prompt:
+        body["system_instruction"] = {"parts": [{"text": system_prompt}]}
+
+    reasoning_buf: list[str] = []
+    answer_buf: list[str] = []
+    usage: dict | None = None
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=300) as client:
+            async with client.stream(
+                "POST",
+                f"{_BASE}/models/{model}:streamGenerateContent",
+                params={"key": _api_key(), "alt": "sse"},
+                json=body,
+            ) as resp:
+                if resp.status_code >= 400:
+                    body_bytes = await resp.aread()
+                    raise RuntimeError(f"Gemini {resp.status_code}: {body_bytes.decode()}")
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = json.loads(line[6:])
+                    if "usageMetadata" in data:
+                        usage = data["usageMetadata"]  # last chunk usually carries totals
+                    parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", []) or []
+                    for part in parts:
+                        text = part.get("text")
+                        if not text:
+                            continue
+                        kind = "reasoning" if part.get("thought") else "answer"
+                        (reasoning_buf if kind == "reasoning" else answer_buf).append(text)
+                        yield {"type": kind, "delta": text}
+    except Exception as e:
+        await _log_stream_summary(
+            "gemini_generate_stream", model, prompt, reasoning_buf, answer_buf,
+            time.monotonic() - t0, "error", usage=usage, error=f"{type(e).__name__}: {e}",
+        )
+        raise
+    await _log_stream_summary(
+        "gemini_generate_stream", model, prompt, reasoning_buf, answer_buf,
+        time.monotonic() - t0, "ok", usage=usage,
+    )
+
+
+async def openai_generate_stream(
+    model: str,
+    prompt: str,
+    system_prompt: str | None = None,
+) -> AsyncIterator[dict]:
+    """Stream OpenAI Responses API with reasoning summary + final output.
+
+    Yields: {"type": "reasoning"|"answer", "delta": str}
+    """
+    input_messages: list = []
+    if system_prompt:
+        input_messages.append({"role": "system", "content": system_prompt})
+    input_messages.append({"role": "user", "content": prompt})
+
+    body = {
+        "model": model,
+        "input": input_messages,
+        "reasoning": {"summary": "auto"},
+        "stream": True,
+    }
+
+    reasoning_buf: list[str] = []
+    answer_buf: list[str] = []
+    usage: dict | None = None
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=300) as client:
+            async with client.stream(
+                "POST",
+                f"{_OPENAI_BASE}/responses",
+                headers={"Authorization": f"Bearer {_openai_key()}"},
+                json=body,
+            ) as resp:
+                if resp.status_code >= 400:
+                    body_bytes = await resp.aread()
+                    raise RuntimeError(f"OpenAI {resp.status_code}: {body_bytes.decode()}")
+
+                event: str | None = None
+                async for line in resp.aiter_lines():
+                    if line.startswith("event: "):
+                        event = line[7:].strip()
+                    elif line.startswith("data: "):
+                        try:
+                            data = json.loads(line[6:])
+                        except json.JSONDecodeError:
+                            continue
+                        if event in ("response.reasoning_summary_text.delta", "response.output_text.delta"):
+                            delta = data.get("delta", "")
+                            if not delta:
+                                continue
+                            kind = "reasoning" if event == "response.reasoning_summary_text.delta" else "answer"
+                            (reasoning_buf if kind == "reasoning" else answer_buf).append(delta)
+                            yield {"type": kind, "delta": delta}
+                        elif event == "response.completed":
+                            # final event carries totals incl. input_tokens_details.cached_tokens
+                            usage = data.get("response", {}).get("usage")
+    except Exception as e:
+        await _log_stream_summary(
+            "openai_generate_stream", model, prompt, reasoning_buf, answer_buf,
+            time.monotonic() - t0, "error", usage=usage, error=f"{type(e).__name__}: {e}",
+        )
+        raise
+    await _log_stream_summary(
+        "openai_generate_stream", model, prompt, reasoning_buf, answer_buf,
+        time.monotonic() - t0, "ok", usage=usage,
+    )

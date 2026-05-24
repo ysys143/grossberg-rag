@@ -1,0 +1,28 @@
+pdf:
+  path: /Users/jaesolshin/Documents/GitHub/icarus/pdf/grossberg_ch4.pdf
+
+storage:
+  working_dir: ./rag_storage
+  output_dir: ./output
+
+models:
+  llm: gemini-3.5-flash              # KG extraction + keyword extraction
+  vision: gemini-3.1-flash-lite      # image description — fast, large-volume
+  embedding: gemini-embedding-2
+  embedding_dim: 3072
+  embedding_max_tokens: 8191
+  answer:
+    provider: openai                 # openai | gemini  (--provider CLI flag overrides)
+    openai: gpt-5.5                  # OpenAI Responses API + reasoning summary streaming
+    gemini: gemini-3.1-pro-preview   # Gemini streamGenerateContent + thought parts streaming
+    system_prompt: prompts/answer_system.md   # style guide prepended to LightRAG sys_prompt
+
+parser:
+  engine: mineru
+  method: auto
+  enable_image: true
+  enable_table: true
+  enable_equation: true
+
+query:
+  default_mode: hybrid

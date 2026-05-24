@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+*.egg-info/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Runtime artifacts
+rag_storage*/
+output*/
+logs/
+*.log
+
+# Test files
+grossberg_ch4_p1.pdf
+grossberg_ch4_p3.pdf
+/tmp/
+
+# uv lockfile (optional — include if reproducibility needed)
+# uv.lock
+
+# Session tracking
+.omc/
+.cwf/
+
+# macOS
+.DS_Store
