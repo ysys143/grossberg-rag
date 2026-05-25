@@ -164,6 +164,13 @@ Grossberg *Conscious Mind, Resonant Brain* 4장(62p)의 멀티모달 RAG. 단일
 - 답변 스타일 가이드가 이 마커를 읽어 인라인 인용 + References를 (문서·섹션·페이지) 단위로 생성. 같은 섹션이 여러 페이지면 범위(p.2–3)로 병합.
 - **재인덱싱 필수**: 출처 입도는 청크에 저장된 정보에 종속 — 쿼리 시점에 만들 수 없음.
 
+### 4.13 **대화형 메모리 — append-only 인용 요약 (chat.py)**
+- `chat.py`는 멀티턴 대화에서 히스토리를 `[Q1, 요약1, Q2, 요약2, ...]` 구조로 누적.
+- 각 턴의 assistant 항목 = **그 턴에서 실제 인용된 청크의 1~2문장 요약** (원문 덤프도, 답변 prose도 아님). `gemini-3.1-flash-lite`(thinking off)로 생성하며 `[src:]` 마커를 보존해 출처 추적이 턴을 넘어 유지됨.
+- **인용 청크 식별**: 답변이 인용한 페이지를 추출 → 전체 assembled prompt를 스캔해 `[src: ... p.N]` 마커가 인용 페이지와 맞는 유닛만 누적. hybrid/mix 모드에선 Document Chunks 블록이 비고 마커가 엔티티/관계 description에 있으므로 블록 한정이 아닌 전체 스캔이 필요.
+- **append-only가 캐싱을 지킴**: 과거 턴 요약은 생성 후 불변 → 프롬프트 prefix 고정 → provider prompt caching 유지. "과거 압축·현재 상세"라는 rolling 요약의 의도는, 현재 턴의 전체 근거를 항상 fresh retrieval이 제공하므로 손실 없이 달성. (rolling은 과거를 재작성해 prefix를 깨므로 채택하지 않음.)
+- `conversation_history`는 LightRAG `QueryParam(conversation_history, history_turns)`로 전달돼 retrieval·프롬프트 조립이 맥락을 인지 → follow-up의 지시어("그게")가 이전 턴 주제로 해소됨.
+
 ---
 
 ## 5. 설치 및 실행
