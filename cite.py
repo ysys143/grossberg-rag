@@ -36,12 +36,24 @@ def enrich_content_list(content_list: list[dict], doc_name: str) -> list[dict]:
             marker = f"[src: {doc_name} | §{section} | p.{page}]"
             new["text"] = f"{marker}\n{text}" if text else marker
         else:
-            # multimodal (image/table/equation): tag caption so the chunk is attributable
+            # multimodal (image/table/equation): the modal processor builds its own
+            # chunk from the vision description and reads image_caption/img_caption
+            # (modalprocessors.py:233), ignoring the item's "text". So inject the
+            # marker into the caption list it actually surfaces.
             marker = f"[src: {doc_name} | §{section} | p.{page} | {ctype}]"
-            cap = item.get("img_caption") or item.get("table_caption") or []
-            if isinstance(cap, list):
-                new["_cite_marker"] = marker  # carried for reference; processors read caption
-            # also stash in a caption-like field RAGAnything surfaces
+            injected = False
+            for cap_field in ("image_caption", "img_caption", "table_caption"):
+                if cap_field in item:
+                    caps = item.get(cap_field) or []
+                    if isinstance(caps, list):
+                        new[cap_field] = [marker, *caps]
+                    else:
+                        new[cap_field] = [marker, str(caps)]
+                    injected = True
+                    break
+            if not injected:
+                new["img_caption"] = [marker]  # image items default to img_caption
+            # keep text marker too, for any text-path fallback
             existing = item.get("text", "")
             new["text"] = f"{marker}\n{existing}" if existing else marker
 

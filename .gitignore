@@ -33,4 +33,5 @@ grossberg_ch4_p3.pdf
 .arize-tmp-traces/
 
 # Session export artifacts
-2026-*.txt          # conversation export artifacts
+# conversation export artifacts
+2026-*.txt
