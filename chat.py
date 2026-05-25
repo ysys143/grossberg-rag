@@ -1,28 +1,22 @@
 """
 Conversational RAG CLI — multi-turn search over the Grossberg index.
 
-Unlike query.py (each question independent), chat.py keeps conversation history
-so follow-ups resolve against prior turns. History is passed to LightRAG
-(conversation_history) for context-aware retrieval AND folded into the assembled
-prompt the answer model sees.
+Thin consumer of `engine.ask_events` (shared with server.py): this file renders
+the engine's event stream to the terminal. Logic lives in engine.py; presentation
+(ANSI prints, Korean status, readline, /commands) lives here. Changing chat
+*behavior* means editing engine.ask_events, not this file — that keeps the CLI and
+the web app from drifting.
 
 Usage:
   python chat.py [--pdf FILE.pdf] [--provider openai|gemini] [--rerank none|oneshot|batched]
+                 [--agent] [--session NAME] [--resume [ID]]
 
 In-session commands:
-  /help                 show commands
-  /provider <name>      switch answer provider (openai | gemini)
-  /rerank <mode>        switch rerank (none | oneshot | batched)
-  /sources              show sources cited in the last answer
-  /history              show the conversation so far
-  /clear                reset conversation history
-  /exit (or Ctrl-D)     quit
+  /help  /provider <name>  /rerank <mode>  /sources  /history  /sessions  /clear  /exit
 """
 import asyncio
-import glob
 import json
 import logging
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -38,16 +32,9 @@ load_dotenv(Path(__file__).parent / ".env")
 load_dotenv(Path.home() / ".oh-my-zsh/custom/apikey.env", override=False)
 
 import yaml
-from lightrag import LightRAG, QueryParam
 
-from models import (
-    llm_model_func, embedding_func, answer_model_stream,
-    ANSWER_PROVIDER_DEFAULT, is_vision_capable,
-)
-from rerank import rerank as rerank_oneshot, rerank_batched
-import image_gate
-import llm
-import router
+from engine import ChatSession, ask_events, _RERANK_FUNCS, _SESSIONS_DIR
+import agent as agent_mod
 import tracing
 
 # Pure-noise loggers stay silenced; the lightrag logger is re-routed to a Korean
@@ -56,7 +43,6 @@ for _name in ("nano-vectordb", "nano_vectordb", "httpx", "httpcore"):
     logging.getLogger(_name).setLevel(logging.WARNING)
 
 tracing.init_tracing("grossberg-rag")
-_tracer = tracing.get_tracer()
 
 _cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
 
@@ -64,368 +50,52 @@ _DIM, _BOLD, _CYAN, _GREEN, _RESET = "\033[2m", "\033[1m", "\033[36m", "\033[32m
 # readline-safe input prompt: wrap non-printing ANSI in \001..\002 so backspace /
 # arrow keys / cursor position aren't thrown off by counting invisible bytes.
 _INPUT_PROMPT = "\001\033[36m\002you >\001\033[0m\002 "
-_MARKER = "\n\n---User Query---\n\n"
-_RERANK_FUNCS = {"none": None, "oneshot": rerank_oneshot, "batched": rerank_batched}
-_HISTORY_TURNS = 6  # how many prior turns LightRAG folds into retrieval/context
-_SUMMARIZE_MODEL = "gemini-3.1-flash-lite"  # cheap, thinking-off summarizer
-_SESSIONS_DIR = Path(__file__).parent / "sessions"  # persisted conversation history
-_INJECT_IMAGES = bool(_cfg["query"].get("inject_images", False))  # query-time figure re-injection
 
 
-# Re-route LightRAG's English INFO logs to richer Korean status lines. Storage-init
-# noise (graph load, KV load, worker init) is dropped; only query-stage messages map.
-_LR_MAP = [
-    (re.compile(r"Query nodes: (.+?) \(top_k"), lambda m: f"엔티티 검색 키워드: {m.group(1)}"),
-    (re.compile(r"Query edges: (.+?) \(top_k"), lambda m: f"관계 검색 키워드: {m.group(1)}"),
-    (re.compile(r"Local query: (\d+) entites?, (\d+) relations"),
-     lambda m: f"지역 검색(엔티티 중심): 엔티티 {m.group(1)}개, 관계 {m.group(2)}개"),
-    (re.compile(r"Global query: (\d+) entites?, (\d+) relations"),
-     lambda m: f"전역 검색(관계 중심): 엔티티 {m.group(1)}개, 관계 {m.group(2)}개"),
-    (re.compile(r"Raw search results: (\d+) entities, (\d+) relations, (\d+) vector chunks"),
-     lambda m: f"원시 검색 결과: 엔티티 {m.group(1)}개, 관계 {m.group(2)}개, 벡터청크 {m.group(3)}개"),
-    (re.compile(r"After truncation: (\d+) entities, (\d+) relations"),
-     lambda m: f"토큰 한도 적용 후: 엔티티 {m.group(1)}개, 관계 {m.group(2)}개"),
-    (re.compile(r"Round-robin merged chunks: (\d+) -> (\d+) \(deduplicated (\d+)\)"),
-     lambda m: f"청크 병합: {m.group(1)} → {m.group(2)}개 (중복 {m.group(3)}개 제거)"),
-    (re.compile(r"Successfully reranked: (\d+) chunks from (\d+) original chunks"),
-     lambda m: f"관련도 재정렬: {m.group(2)}개 → {m.group(1)}개"),
-    (re.compile(r"Final context: (\d+) entities, (\d+) relations, (\d+) chunks"),
-     lambda m: f"최종 컨텍스트: 엔티티 {m.group(1)}개, 관계 {m.group(2)}개, 청크 {m.group(3)}개"),
-]
+# LightRAG's English INFO logs are translated to Korean status events inside
+# engine.ask_events (single source); cli_ask renders them like any other status.
 
 
-class _KoreanStatusHandler(logging.Handler):
-    def emit(self, record):
-        msg = record.getMessage()
-        for pat, fn in _LR_MAP:
-            m = pat.search(msg)
-            if m:
-                print(f"{_DIM}·   {fn(m)}{_RESET}")
-                return
-        # unmatched LightRAG INFO (storage init etc.) -> dropped
-
-
-_lr_logger = logging.getLogger("lightrag")
-_lr_logger.handlers.clear()            # drop LightRAG's English console handler
-_lr_logger.addHandler(_KoreanStatusHandler())
-_lr_logger.setLevel(logging.INFO)
-_lr_logger.propagate = False
-
-
-async def _summarize_cited(question: str, cited: list[str]) -> str:
-    """One-shot summary of the cited chunks for this turn (append-only history).
-
-    Keeps [src: ...] markers on the key facts so attribution survives into
-    follow-up turns. Uses the fast flash-lite model with thinking disabled.
-    """
-    joined = "\n\n".join(cited)
-    prompt = (
-        "Summarize these cited source excerpts into 1-2 sentences capturing the "
-        "key facts that answered the question. Preserve the [src: ...] marker for "
-        "each key fact. Output only the summary.\n\n"
-        f"Question: {question}\n\nCited excerpts:\n{joined}"
-    )
-    return await llm.generate(
-        model=_SUMMARIZE_MODEL, prompt=prompt, thinking_budget=0, temperature=0
-    )
-
-
-class ChatSession:
-    def __init__(self, working_dir: str, provider: str | None, rerank_mode: str,
-                 session_path: Path):
-        self.working_dir = working_dir
-        self.provider = provider or ANSWER_PROVIDER_DEFAULT
-        self.rerank_mode = rerank_mode
-        self.session_path = session_path
-        self.history: list[dict] = []   # [{"role": "user"|"assistant", "content": str}]
-        self.last_sources: list[str] = []
-        self.last_image_sources: list[str] = []   # [src:...|image] markers injected as pixels last turn
-        self.rag: LightRAG | None = None
-        self.pending_question: str | None = None  # original Q awaiting HITL clarification
-
-    def load(self) -> int:
-        """Restore history (+ provider/rerank if not CLI-overridden). Returns prior turn count."""
-        if not self.session_path.exists():
-            return 0
-        data = json.loads(self.session_path.read_text())
-        self.history = data.get("history", [])
-        return len(self.history) // 2
-
-    def save(self) -> None:
-        """Atomic write of the session so a crash mid-turn can't corrupt it."""
-        _SESSIONS_DIR.mkdir(exist_ok=True)
-        data = {
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
-            "working_dir": self.working_dir,
-            "provider": self.provider,
-            "rerank_mode": self.rerank_mode,
-            "history": self.history,
-        }
-        tmp = self.session_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
-        tmp.replace(self.session_path)
-
-    async def setup(self):
-        self.rag = LightRAG(
-            working_dir=self.working_dir,
-            llm_model_func=llm_model_func,
-            embedding_func=embedding_func,
-            rerank_model_func=_RERANK_FUNCS[self.rerank_mode],
-        )
-        await self.rag.initialize_storages()
-
-    async def teardown(self):
-        if self.rag is not None:
-            await self.rag.finalize_storages()
-
-    def set_rerank(self, mode: str):
-        self.rerank_mode = mode
-        self.rag.rerank_model_func = _RERANK_FUNCS[mode]  # live swap, no rebuild
-
-    async def _select_images(self, question: str, sys_prompt: str) -> list[str] | None:
-        """Relevance-gate the retrieved figures and return file paths to inject as
-        pixels, or None. Records the chosen [src:...|image] markers for citation."""
-        self.last_image_sources = []
-        if not _INJECT_IMAGES:
-            return None
-        cands = _image_candidates(sys_prompt)
-        if not cands:
-            return None
-        if not is_vision_capable(self.provider):
-            print(f"{_DIM}· [경고] inject_images=true이지만 현재 답변 모델({self.provider})이 "
-                  f"이미지 입력을 지원하지 않아 텍스트로만 답변합니다{_RESET}")
-            return None
-        print(f"{_DIM}· 관련 이미지를 선별하고 있습니다 (후보 {len(cands)}개)...{_RESET}")
-        selected = await image_gate.select_relevant_images(question, cands)
-        if not selected:
-            print(f"{_DIM}·   직접 관련된 이미지가 없어 주입하지 않습니다{_RESET}")
-            return None
-        by_hash = {c["hash"]: c for c in cands}
-        chosen = [by_hash[h] for h in selected if h in by_hash]
-        self.last_image_sources = [c["marker"] for c in chosen if c["marker"]]
-        print(f"{_DIM}·   이미지 {len(chosen)}개를 답변 컨텍스트에 주입합니다{_RESET}")
-        return [c["path"] for c in chosen]
-
-    async def ask(self, question: str, skip_clarify: bool = False):
-        mode = _cfg["query"]["default_mode"]
-        fn = _RERANK_FUNCS[self.rerank_mode]
-
-        # Router runs first: decide scope, whether to retrieve, and reasoning effort.
-        print(f"{_DIM}· 질문 유형을 분석하고 있습니다...{_RESET}")
-        decision = await router.route(question, self.history)
-        if not decision["in_scope"]:
-            msg = ("이 질문은 문서(Grossberg 시각 지각 신경 모델) 범위를 벗어납니다. "
-                   "문서 내용에 대해 질문해 주세요.")
-            print(f"\n{msg}\n")
-            self.history.append({"role": "user", "content": question})
-            self.history.append({"role": "assistant", "content": "(범위 밖 질문 — 거절)"})
-            self.save()
-            return
-
-        # HITL clarification gate: if the question is too vague to retrieve well,
-        # pause and ask the user instead of searching. skip_clarify forces past the
-        # gate once the user has already answered (one-round cap -> no loops).
-        if decision["needs_clarification"] and not skip_clarify:
-            self.pending_question = question
+async def cli_ask(sess: ChatSession, question: str, skip_clarify: bool = False) -> None:
+    """Render engine.ask_events to the terminal (CLI presentation of one turn)."""
+    current: str | None = None
+    streamed = False
+    async for ev in ask_events(sess, question, skip_clarify):
+        t = ev["type"]
+        if t == "status":
+            pre = "·   " if ev.get("detail") else "· "
+            print(f"{_DIM}{pre}{ev['msg']}{_RESET}")
+        elif t == "routing":
+            need = ev["needs_retrieval"]
+            print(f"{_DIM}·   판단: 검색 {'필요' if need else '불필요'} · 추론 강도 {ev['effort']}{_RESET}")
+        elif t == "decline":
+            print(f"\n{ev['msg']}\n")
+        elif t == "clarify":
             print(f"\n{_BOLD}· 질문을 좀 더 구체화해 주세요:{_RESET}")
-            print(f"  {decision['clarification']}\n")
-            return  # not recorded in history; resumes when the user replies
-
-        effort = decision["effort"]
-        need = decision["needs_retrieval"]
-        print(f"{_DIM}·   판단: 검색 {'필요' if need else '불필요'} · 추론 강도 {effort}{_RESET}")
-
-        chain_cm = (
-            _tracer.start_as_current_span("chat_turn") if _tracer else _nullctx()
-        )
-        with chain_cm as span:
-            if span is not None:
-                span.set_attribute("openinference.span.kind", "CHAIN")
-                span.set_attribute("input.value", question)
-                span.set_attribute("metadata.turn", len(self.history) // 2 + 1)
-                span.set_attribute("metadata.router.needs_retrieval", need)
-                span.set_attribute("metadata.router.effort", effort)
-
-            if need:
-                print(f"{_DIM}· 「{question}」 관련 내용을 검색 중입니다...{_RESET}")
-                assembled = await self.rag.aquery(
-                    question,
-                    param=QueryParam(
-                        mode=mode,
-                        only_need_prompt=True,
-                        enable_rerank=(fn is not None),
-                        conversation_history=self.history[-_HISTORY_TURNS * 2:],
-                        history_turns=_HISTORY_TURNS,
-                    ),
-                )
-                sys_prompt, user_query = (
-                    assembled.split(_MARKER, 1) if _MARKER in assembled else (assembled, question)
-                )
+            print(f"  {ev['question']}\n")
+        elif t in ("reasoning", "answer"):
+            streamed = True
+            if t != current:
+                print(f"\n{_DIM}[Reasoning]{_RESET}" if t == "reasoning"
+                      else f"\n{_BOLD}[Answer]{_RESET}")
+                current = t
+            if t == "reasoning":
+                print(f"{_DIM}{ev['delta']}{_RESET}", end="", flush=True)
             else:
-                # No retrieval: hand the answer model only the conversation so far
-                # (handles greetings, thanks, and meta-questions like "정리해줘").
-                hist = self.history[-_HISTORY_TURNS * 2:]
-                sys_prompt = ("이전 대화:\n" + "\n".join(
-                    f"{h['role']}: {h['content']}" for h in hist)) if hist else ""
-                user_query = question
-
-            self.last_sources = _extract_sources(sys_prompt)
-            # (detailed retrieval/rerank stages are surfaced in Korean by the
-            #  _KoreanStatusHandler that intercepts LightRAG's logs above)
-
-            # Query-time figure re-injection: pick only figures DIRECTLY relevant to
-            # this question and feed their pixels to the (multimodal) answer model, so
-            # it can override a wrong text caption with what it actually observes.
-            images = await self._select_images(question, sys_prompt) if need else None
-            if span is not None:
-                span.set_attribute("metadata.injected_images", len(images or []))
-
-            print(f"{_DIM}· {self.provider} 모델로 답변을 생성하고 있습니다 (강도 {effort})...{_RESET}\n")
-
-            print(f"{_DIM}[Reasoning]{_RESET}")
-            answer_parts: list[str] = []
-            current = "reasoning"
-            async for chunk in answer_model_stream(
-                prompt=user_query, system_prompt=sys_prompt,
-                provider=self.provider, effort=effort, images=images,
-            ):
-                if chunk["type"] != current:
-                    print(f"\n{_BOLD}[Answer]{_RESET}" if chunk["type"] == "answer"
-                          else f"\n{_DIM}[Reasoning]{_RESET}")
-                    current = chunk["type"]
-                if chunk["type"] == "reasoning":
-                    print(f"{_DIM}{chunk['delta']}{_RESET}", end="", flush=True)
-                else:
-                    answer_parts.append(chunk["delta"])
-                    print(chunk["delta"], end="", flush=True)
-            print()
-            answer = "".join(answer_parts)
-            if span is not None:
-                span.set_attribute("output.value", answer)
-
-        # Append-only history: each turn stores a one-shot SUMMARY of its cited
-        # chunks (never the verbose prose, never rewritten later). Past turns stay
-        # frozen so the prompt prefix is stable -> provider prompt caching keeps
-        # working. The current turn's full evidence always comes from fresh
-        # retrieval, so summarizing the past loses no answer fidelity.
-        if need:
-            cited = _cited_chunks(answer, sys_prompt)
-            summary = await _summarize_cited(question, cited) if cited else "(no sources cited)"
-            print(f"{_DIM}· 인용된 근거 {len(cited)}개를 요약해 대화 기억에 추가했습니다{_RESET}")
-        else:
-            # No retrieval -> no cited chunks; keep a short gist of the reply.
-            summary = answer[:300]
-        self.history.append({"role": "user", "content": question})
-        self.history.append({"role": "assistant", "content": summary})
-        self.save()  # persist after every turn (crash-safe)
+                print(ev["delta"], end="", flush=True)
+        elif t == "done":
+            if streamed:
+                print()
+            if ev.get("summarized"):
+                print(f"{_DIM}· 인용된 근거 {ev['cited']}개를 요약해 대화 기억에 추가했습니다{_RESET}")
+        # images / sources events: ignored by the CLI (sources shown via /sources)
 
 
-class _nullctx:
-    def __enter__(self): return None
-    def __exit__(self, *a): return False
-
-
-def _extract_sources(sys_prompt: str) -> list[str]:
-    """Pull distinct [src: ...] markers from the assembled context."""
-    seen, out = set(), []
-    for m in re.findall(r"\[src:[^\]]+\]", sys_prompt):
-        if m not in seen:
-            seen.add(m)
-            out.append(m)
-    return out
-
-
-def _resolve_image_path(img_hash: str, content: str) -> str | None:
-    """Recover the original figure file: prefer the absolute path embedded in the
-    chunk ("Image Path: /.../<hash>.jpg"); else glob the output images dir by hash."""
-    m = re.search(r"(/\S+?/images/" + re.escape(img_hash) + r"\.\w+)", content)
-    if m and Path(m.group(1)).exists():
-        return m.group(1)
-    hits = glob.glob(f"output*/**/images/{img_hash}.*", recursive=True)
-    return hits[0] if hits else None
-
-
-def _image_candidates(sys_prompt: str) -> list[dict]:
-    """Distinct figure chunks in the assembled context, as gate candidates:
-    {hash, caption, section, page, marker, path}. Drops any whose file can't be found."""
-    out, seen = [], set()
-    for line in sys_prompt.splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        content = obj.get("content") or obj.get("description") or ""
-        if "Image Path" not in content:
-            continue
-        hm = re.search(r"images/([a-f0-9]+)", content)
-        if not hm or hm.group(1) in seen:
-            continue
-        img_hash = hm.group(1)
-        path = _resolve_image_path(img_hash, content)
-        if not path:
-            continue
-        seen.add(img_hash)
-        marker_m = re.search(r"\[src:[^\]]*image\]", content)
-        marker = marker_m.group(0) if marker_m else ""
-        sec_m = re.search(r"§(.+?)\s*\|\s*p\.(\d+)", marker or content)
-        out.append({
-            "hash": img_hash,
-            "caption": content[:600],
-            "section": sec_m.group(1).strip() if sec_m else "?",
-            "page": int(sec_m.group(2)) if sec_m else 0,
-            "marker": marker,
-            "path": path,
-        })
-    return out
-
-
-def _cited_pages(answer: str) -> set[int]:
-    """Pages the answer cited: matches p.N and ranges p.N-M / p.N–M."""
-    pages: set[int] = set()
-    for a, b in re.findall(r"p\.\s*(\d+)\s*[-–]\s*(\d+)", answer):
-        pages.update(range(int(a), int(b) + 1))
-    for n in re.findall(r"p\.\s*(\d+)", answer):
-        pages.add(int(n))
-    return pages
-
-
-def _cited_chunks(answer: str, sys_prompt: str) -> list[str]:
-    """Return retrieved units (entity/relation/chunk) whose [src: ... p.N] page was
-    cited in the answer.
-
-    In hybrid/mix mode the Document Chunks block is often empty — retrieval is
-    entity/relation-centric, and the [src:] markers live inside entity/relation
-    DESCRIPTIONS (KG extraction absorbed them from the source text). So we scan
-    every JSON object across all context blocks, not just Document Chunks. Page is
-    the match key (clean integers vs OCR-noisy section names).
-    """
-    pages = _cited_pages(answer)
-    if not pages:
-        return []
-    out, seen = [], set()
-    for line in sys_prompt.splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        text = obj.get("content") or obj.get("description") or ""
-        pm = re.search(r"\[src:[^\]]*\|\s*p\.(\d+)", text)
-        if pm and int(pm.group(1)) in pages and text not in seen:
-            seen.add(text)
-            out.append(text[:1000])
-    return out
-
-
-def _parse_args() -> tuple[str, str | None, str, Path]:
+def _parse_args() -> tuple[str, str | None, str, Path, bool]:
     args = sys.argv[1:]
     pdf_stem, provider, rerank_mode = None, None, "oneshot"
     session_name, resume = None, False
+    agent_mode = "--agent" in args
     if "--pdf" in args:
         i = args.index("--pdf"); pdf_stem = Path(args[i + 1]).stem
     if "--provider" in args:
@@ -455,7 +125,7 @@ def _parse_args() -> tuple[str, str | None, str, Path]:
         session_path = existing[0] if existing else _SESSIONS_DIR / f"{_session_ts()}.json"
     else:
         session_path = _SESSIONS_DIR / f"{_session_ts()}.json"
-    return wdir, provider, rerank_mode, session_path
+    return wdir, provider, rerank_mode, session_path, agent_mode
 
 
 def _session_ts() -> str:
@@ -473,7 +143,47 @@ _HELP = """commands:
   /exit              quit (or 'exit', Ctrl-D)
 session: auto-saved each turn -> sessions/<name>.json
   --session NAME              resume/create a named session
-  --resume|--continue|-c [id] continue most recent, or a specific <id> if given"""
+  --resume|--continue|-c [id] continue most recent, or a specific <id> if given
+  --agent                     use the agentic loop (multi-step retrieval + web search)"""
+
+
+async def _run_agent_turn(sess: ChatSession, question: str) -> None:
+    """Handle one question turn via the agentic loop (agent.py).
+
+    The agent manages its own KBTool/LightRAG internally; sess.rag is unused
+    in this path. sess.history and sess.provider are passed through for
+    multi-turn context and provider selection.
+    """
+    answer_parts: list[str] = []
+    current: str | None = None
+
+    async for chunk in agent_mod.run_agent_stream(
+        question=question,
+        working_dir=sess.working_dir,
+        provider=sess.provider,
+        conversation_history=sess.history,
+    ):
+        t = chunk["type"]
+        d = chunk["delta"]
+        if t == "status":
+            print(f"{_DIM}{d}{_RESET}", flush=True)
+        elif t == "reasoning":
+            if current != "reasoning":
+                print(f"\n{_DIM}[Reasoning]{_RESET}")
+                current = "reasoning"
+            print(f"{_DIM}{d}{_RESET}", end="", flush=True)
+        elif t == "answer":
+            if current != "answer":
+                print(f"\n{_BOLD}[Answer]{_RESET}\n")
+                current = "answer"
+            answer_parts.append(d)
+            print(d, end="", flush=True)
+    print()
+
+    answer = "".join(answer_parts)
+    sess.history.append({"role": "user", "content": question})
+    sess.history.append({"role": "assistant", "content": answer[:300]})
+    sess.save()
 
 
 async def _handle_command(line: str, sess: ChatSession) -> bool:
@@ -526,16 +236,19 @@ async def _handle_command(line: str, sess: ChatSession) -> bool:
 
 
 async def main():
-    wdir, provider, rerank_mode, session_path = _parse_args()
+    wdir, provider, rerank_mode, session_path, agent_mode = _parse_args()
     if not Path(wdir).exists():
         print(f"ERROR: Storage not found -- {wdir}\n       Run ingest.py first.")
         sys.exit(1)
 
     sess = ChatSession(wdir, provider, rerank_mode, session_path)
     prior = sess.load()
-    await sess.setup()
+    if not agent_mode:
+        await sess.setup()
+
     print(f"{_CYAN}{_BOLD}Grossberg RAG -- conversational search{_RESET}")
-    print(f"{_DIM}storage={wdir} · provider={sess.provider} · rerank={sess.rerank_mode} · session={session_path.stem} · /help{_RESET}")
+    mode_tag = "agent=true" if agent_mode else f"rerank={sess.rerank_mode}"
+    print(f"{_DIM}storage={wdir} · provider={sess.provider} · {mode_tag} · session={session_path.stem} · /help{_RESET}")
     if prior:
         print(f"{_DIM}· 이전 세션 {prior}개 턴을 이어갑니다{_RESET}")
     print()
@@ -561,20 +274,23 @@ async def main():
                     break
                 continue
             try:
-                if sess.pending_question is not None:
+                if agent_mode:
+                    await _run_agent_turn(sess, line)
+                elif sess.pending_question is not None:
                     # This line answers a prior clarification request: merge it with
                     # the original question and force past the gate (skip_clarify).
                     merged = f"{sess.pending_question}\n\n[사용자 보충 설명] {line}"
                     sess.pending_question = None
-                    await sess.ask(merged, skip_clarify=True)
+                    await cli_ask(sess, merged, skip_clarify=True)
                 else:
-                    await sess.ask(line)
+                    await cli_ask(sess, line)
             except KeyboardInterrupt:  # Ctrl-C during streaming -> cancel this turn
                 print(f"\n{_DIM}· 생성을 중단했습니다 (종료: /exit 또는 빈 입력에서 Ctrl-C){_RESET}")
                 continue
             print()
     finally:
-        await sess.teardown()
+        if not agent_mode:
+            await sess.teardown()
         tracing.shutdown_tracing()
 
 
