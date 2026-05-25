@@ -1,0 +1,670 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grossberg RAG</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --dim:#8b93a7; --fg:#e6e9ef; --acc:#6ea8fe; --grn:#5ec27a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  header { padding:14px 20px; border-bottom:1px solid #242833; display:flex;
+           align-items:center; gap:12px; position:sticky; top:0; background:var(--bg); z-index:5; }
+  header h1 { font-size:15px; margin:0; font-weight:600; cursor:pointer; }
+  header h1:hover { color:var(--acc); }
+  .titlewrap { position:relative; display:inline-block; }
+  .titlewrap .tip { position:absolute; top:140%; left:0; z-index:30; width:max-content; max-width:320px;
+                    background:var(--panel); border:1px solid #2d3340; border-radius:8px;
+                    padding:8px 12px; font-size:12px; font-weight:400; line-height:1.5; color:var(--fg);
+                    box-shadow:0 6px 18px rgba(0,0,0,.45);
+                    opacity:0; visibility:hidden; transition:opacity .1s; }
+  .titlewrap .tip::before { content:""; position:absolute; bottom:100%; left:18px;
+                            border:6px solid transparent; border-bottom-color:#2d3340; }
+  .titlewrap:hover .tip { opacity:1; visibility:visible; }   /* instant on hover */
+  header .sp { flex:1; }
+  button { font:inherit; cursor:pointer; border-radius:8px; border:1px solid #2d3340;
+           background:var(--panel); color:var(--fg); padding:7px 12px; }
+  button:hover { border-color:var(--acc); }
+  #wrap { max-width:820px; margin:0 auto; padding:18px 16px 140px; }
+
+  /* example questions: collapsed into a dropdown */
+  #presetbox { margin-bottom:18px; }
+  #presetbox > summary { display:flex; align-items:center; gap:8px; cursor:pointer; user-select:none;
+                         color:var(--fg); font-size:13px; padding:9px 14px; list-style:none;
+                         background:var(--panel); border:1px solid #2d3340; border-radius:10px;
+                         transition:border-color .15s, background .15s; }
+  #presetbox > summary::-webkit-details-marker { display:none; }
+  #presetbox > summary:hover { border-color:var(--acc); background:#1d2330; }
+  #presetbox > summary::after { content:"\25B8"; margin-left:auto; color:var(--dim);
+                                transition:transform .15s; }
+  #presetbox[open] > summary::after { transform:rotate(90deg); }
+  /* preset cards: one per row, full width, compact */
+  .presets { display:flex; flex-direction:column; gap:6px; margin-top:8px; }
+  .preset { width:100%; text-align:left; display:block; padding:8px 12px; line-height:1.4; }
+  .preset .tier { display:inline-block; font-size:10px; font-weight:700; color:var(--acc);
+                  border:1px solid #2d3340; border-radius:5px; padding:0 6px; margin-right:8px; vertical-align:1px; }
+  .preset .ptitle { font-size:13px; font-weight:600; }
+  .preset .pfull { display:block; font-size:11px; color:var(--dim); margin-top:3px; line-height:1.5; }
+
+  .turn { margin:18px 0; }
+  .user { background:#1d2330; border-radius:10px; padding:10px 14px; margin-bottom:10px; white-space:pre-wrap; }
+  .user::before { content:"you"; color:var(--acc); font-size:12px; display:block; margin-bottom:2px; }
+  .asst { padding:2px 2px; }
+  details.status-block { margin:4px 0; }
+  details.status-block > summary { color:var(--dim); cursor:pointer;
+                                   font:12px ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .status-body { margin-top:4px; }
+  .sline { color:var(--dim); font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; }
+  .sline.detail { padding-left:14px; opacity:.82; }
+  .badge { display:inline-block; font-size:11px; color:var(--dim); border:1px solid #2d3340;
+           border-radius:6px; padding:1px 7px; margin:4px 0; }
+  details.reasoning { margin:6px 0; }
+  details.reasoning summary { color:var(--dim); font-size:13px; cursor:pointer; }
+  .reasoning .body { color:var(--dim); font:12px/1.55 ui-monospace,Menlo,monospace;
+                     white-space:pre-wrap; border-left:2px solid #2d3340; padding-left:10px; margin-top:6px; }
+  .answer { margin-top:6px; }
+  .answer h1,.answer h2,.answer h3 { margin:14px 0 6px; line-height:1.3; }
+  .answer h1 { font-size:18px; } .answer h2 { font-size:16px; } .answer h3 { font-size:14px; color:var(--acc); }
+  .answer p { margin:8px 0; }
+  .answer ul { margin:6px 0; padding-left:20px; }
+  .answer li { margin:2px 0; }
+  .answer strong { color:#fff; }
+  .answer code { background:#222734; padding:1px 5px; border-radius:4px; font:13px ui-monospace,Menlo,monospace; }
+  /* single-row horizontal scroller; mixed-shape figures kept uniform */
+  .gallery { display:flex; flex-wrap:nowrap; gap:10px; margin:10px 0; overflow-x:auto;
+             scroll-behavior:smooth; padding-bottom:8px;
+             scrollbar-width:thin; scrollbar-color:#2d3340 transparent; }
+  .gallery::-webkit-scrollbar { height:6px; }
+  .gallery::-webkit-scrollbar-thumb { background:#2d3340; border-radius:3px; }
+  /* edge fade only when there is more to scroll in that direction (toggled in JS) */
+  .gallery.fade-right { -webkit-mask-image:linear-gradient(to right,#000 calc(100% - 64px),transparent);
+                        mask-image:linear-gradient(to right,#000 calc(100% - 64px),transparent); }
+  .gallery.fade-left  { -webkit-mask-image:linear-gradient(to right,transparent,#000 64px);
+                        mask-image:linear-gradient(to right,transparent,#000 64px); }
+  .gallery.fade-left.fade-right {
+        -webkit-mask-image:linear-gradient(to right,transparent,#000 64px,#000 calc(100% - 64px),transparent);
+        mask-image:linear-gradient(to right,transparent,#000 64px,#000 calc(100% - 64px),transparent); }
+  .fig { flex:0 0 190px; border:1px solid #2d3340; border-radius:8px; overflow:hidden; background:var(--panel); }
+  .fig img { width:100%; height:128px; object-fit:contain; background:#fff; display:block; cursor:zoom-in; }
+  .fig .cap { font-size:11px; color:var(--dim); padding:6px 8px; line-height:1.4;
+              display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .sources { margin-top:12px; font-size:13px; color:var(--dim); }
+  .sources .src { padding:1px 0; }
+  .sources .inj { color:var(--grn); }
+  .sources .clickable { cursor:pointer; text-decoration:underline dotted; }
+  .sources .clickable:hover { color:#7ee0a0; }
+  .sources .src.flash { background:#2a3550; border-radius:4px; }
+  .answer .fn { font-size:.72em; }
+  .answer .fn a { color:var(--acc); text-decoration:none; padding:0 1px; }
+  .answer .fn a:hover { text-decoration:underline; }
+  details.sources.etc { margin-top:12px; }
+  details.sources.etc > summary { cursor:pointer; color:var(--dim); font-size:12px; margin-bottom:4px; }
+  .decline { color:#e0a458; }
+  .clarify { color:var(--acc); }
+  .err { color:#e06c75; }
+  #sidebar { position:fixed; top:0; left:0; bottom:0; width:240px; z-index:7;
+             background:#0b0d11; border-right:1px solid #242833; padding:12px 10px; overflow-y:auto; }
+  #sessions { display:flex; flex-direction:column; gap:2px; }
+  .sess-item { display:flex; align-items:center; gap:6px; padding:8px 10px; border-radius:8px;
+               cursor:pointer; color:var(--dim); font-size:13px; white-space:nowrap;
+               overflow:hidden; text-overflow:ellipsis; }
+  .sess-item:hover { background:#15181f; color:var(--fg); }
+  .sess-item.active { background:#1d2330; color:var(--fg); }
+  .sess-item .title { flex:1; overflow:hidden; text-overflow:ellipsis; }
+  .sess-item .del { color:var(--dim); opacity:0; padding:0 2px; }
+  .sess-item:hover .del { opacity:.7; }
+  .sess-item .del:hover { color:#e06c75; opacity:1; }
+  #main { margin-left:240px; }
+  #bar { position:fixed; bottom:0; left:240px; right:0; background:var(--bg); border-top:1px solid #242833; padding:12px 16px; }
+  #sidebar { transition:transform .2s ease; }
+  #main, #bar { transition:margin-left .2s ease, left .2s ease; }
+  body.nosidebar #sidebar { transform:translateX(-100%); }
+  body.nosidebar #main { margin-left:0; }
+  body.nosidebar #bar { left:0; }
+  #sidetoggle { font-size:18px; line-height:1; padding:3px 11px; }
+  #bar .row { max-width:820px; margin:0 auto; display:flex; gap:10px; }
+  #q { flex:1; font:inherit; background:var(--panel); color:var(--fg); border:1px solid #2d3340;
+       border-radius:10px; padding:11px 14px; }
+  #q:focus { outline:none; border-color:var(--acc); }
+  #qlist { max-width:820px; margin:0 auto 6px; }
+  #qlist .qitem { font-size:12px; color:var(--dim); line-height:1.5;
+                  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #overlay { position:fixed; inset:0; background:rgba(0,0,0,.88); display:none;
+             align-items:center; justify-content:center; cursor:zoom-out; z-index:10; padding:24px; }
+  #overlay .ovbox { display:flex; flex-direction:column; gap:12px; align-items:center; max-width:900px; }
+  #overlayImg { max-width:88vw; max-height:56vh; background:#fff; border-radius:6px; }
+  #overlayCap { color:var(--fg); font-size:13px; line-height:1.6; width:100%; max-width:760px;
+                max-height:32vh; overflow-y:auto; padding-right:8px;
+                scrollbar-width:thin; scrollbar-color:#2d3340 transparent; }
+  #overlayCap::-webkit-scrollbar { width:6px; }
+  #overlayCap::-webkit-scrollbar-thumb { background:#2d3340; border-radius:3px; }
+  #overlayCap .t { display:block; font-weight:600; color:#fff; margin-bottom:5px; }
+  #errmodal { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none;
+              align-items:center; justify-content:center; z-index:20; padding:24px; }
+  #errmodal .ebox { background:var(--panel); border:1px solid #2d3340; border-radius:12px;
+                    padding:20px 24px; max-width:640px; width:100%; }
+  #errmodal.is-error .ebox { border-color:#e06c75; }
+  #errmodal .etitle { font-weight:700; margin-bottom:10px; color:var(--acc); }
+  #errmodal.is-error .etitle { color:#e06c75; }
+  #emsg { color:var(--fg); font-size:13px; line-height:1.6; margin-bottom:16px; white-space:pre-wrap;
+          max-height:56vh; overflow-y:auto; scrollbar-width:thin; scrollbar-color:#2d3340 transparent; }
+  #emsg::-webkit-scrollbar { width:6px; }
+  #emsg::-webkit-scrollbar-thumb { background:#2d3340; border-radius:3px; }
+  .srcimg { max-width:100%; max-height:30vh; object-fit:contain; background:#fff;
+            border-radius:6px; margin-bottom:10px; display:block; cursor:zoom-in; }
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <div id="sessions"></div>
+</div>
+<div id="main">
+<header>
+  <button id="sidetoggle" title="세션 목록 열기/닫기">&#8801;</button>
+  <div class="titlewrap">
+    <h1>Grossberg RAG</h1>
+    <span class="tip">현재 4장(Chapter 4)만 인덱싱되어 있으며, 향후 다른 장도 추가할 예정입니다.</span>
+  </div>
+  <span class="sp"></span>
+  <button id="reset">새 대화</button>
+</header>
+
+<div id="wrap">
+  <details id="presetbox">
+    <summary>예시 질문 보기 (난이도별)</summary>
+    <div class="presets" id="presets"></div>
+  </details>
+  <div id="chat"></div>
+</div>
+
+<div id="bar">
+  <div id="qlist"></div>
+  <div class="row">
+    <input id="q" placeholder="질문을 입력하세요…" autocomplete="off">
+    <button id="send">전송</button>
+  </div>
+</div>
+</div><!-- /#main -->
+
+<div id="overlay"><div class="ovbox"><img id="overlayImg" alt=""><div id="overlayCap"></div></div></div>
+
+<div id="errmodal"><div class="ebox">
+  <div class="etitle" id="etitle">알림</div>
+  <div id="emsg"></div>
+  <button id="eclose">닫기</button>
+</div></div>
+
+<script>
+const PRESETS = [
+  { tier:"쉬움", title:"FACADE 이론이란?",
+    q:"FACADE 이론이 뭐야?" },
+  { tier:"중간", title:"경계 완성(BCS) vs 표면 채움(FCS)",
+    q:"경계 완성(BCS)과 표면 채움(FCS)은 어떻게 다른가?" },
+  { tier:"어려움", title:"LAMINART 층별 회로와 깊이 지각",
+    q:"LAMINART 모델의 피질 층별 회로(layer 4, 6, 2/3)가 BCS 경계 완성에 어떻게 기여하는지 설명하고, 단안/양안 시각 정보 통합과 깊이 지각 메커니즘도 함께 설명해줘. 그리고 이 회로가 Kanizsa 삼각형 같은 주관적 윤곽 지각과 어떻게 연결되는지도 포함해줘." },
+  { tier:"최고난도", title:"BCS '보이지 않는 경계' 역설",
+    q:"Grossberg 모델에서 BCS 경계는 '보이지 않는다'고 알려져 있다 — BCS 신호는 FCS 안으로 전파되지 않기 때문이다. 그런데 Kanizsa 삼각형에서 우리는 실제로 주관적 윤곽을 '본다'. 이 모순을 해소하라: (1) BCS 경계가 어떤 조건에서 의식적 지각으로 연결되는지, (2) end-cut 메커니즘과 double-opponent competition이 이 역설 해소에 각각 어떻게 기여하는지, (3) FACADE의 '보이지 않는 경계' 주장이 성립하는 맥락과 제한되는 맥락을 구분하라. 네온 색 확산(neon color spreading)과 Craik-O'Brien-Cornsweet 착시도 이 틀 안에서 비교 설명하라." },
+  { tier:"종합", title:"이 챕터 전체의 흐름 정리",
+    q:"이 챕터 전체의 흐름을 정리해줘. 어떤 개념, 메커니즘, 증거가 제시되고 어떻게 연결되는지." },
+];
+
+const chat = document.getElementById('chat');
+const qInput = document.getElementById('q');
+const sendBtn = document.getElementById('send');
+const overlay = document.getElementById('overlay');
+const overlayImg = document.getElementById('overlayImg');
+const overlayCap = document.getElementById('overlayCap');
+const errmodal = document.getElementById('errmodal');
+const emsg = document.getElementById('emsg');
+const etitle = document.getElementById('etitle');
+const qlist = document.getElementById('qlist');
+const sessionsEl = document.getElementById('sessions');
+let busy = false;
+const queue = [];          // questions submitted while a turn is streaming
+
+// ---- multi-session state (sidebar) ----
+// Sidebar list + per-session transcript live in localStorage; the server keeps a
+// matching ChatSession per id (keyed by session_id sent with each /api/ask).
+const SIDX_KEY = 'gr_sessions';   // [{id, title}], newest first
+const ACTIVE_KEY = 'gr_active';
+const tkey = id => 'gr_turns_' + id;
+const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+function loadJSON(k, d) { try { const v = JSON.parse(localStorage.getItem(k)); return v ?? d; } catch { return d; } }
+let sessionList = loadJSON(SIDX_KEY, []);
+let activeId = localStorage.getItem(ACTIVE_KEY);
+let turns = [];   // active session's transcript
+
+function saveSessions() { localStorage.setItem(SIDX_KEY, JSON.stringify(sessionList)); }
+function saveTurns() { if (activeId) localStorage.setItem(tkey(activeId), JSON.stringify(turns)); }
+
+function el(cls, parent, text) {
+  const d = document.createElement('div');
+  if (cls) d.className = cls;
+  if (text !== undefined) d.textContent = text;
+  if (parent) parent.appendChild(d);
+  return d;
+}
+function zoom(it) {
+  overlayImg.src = it.url;
+  overlayCap.innerHTML = '';
+  const head = (it.title || (it.section ? `§${it.section}` : '')) + (it.page ? `  (p.${it.page})` : '');
+  if (head.trim()) { const t = document.createElement('span'); t.className = 't'; t.textContent = head; overlayCap.appendChild(t); }
+  if (it.desc) overlayCap.appendChild(document.createTextNode(it.desc));
+  overlay.style.display = 'flex';
+}
+overlay.addEventListener('click', () => overlay.style.display = 'none');
+
+// notice/error popup
+function showModal(title, msg, isError) {
+  etitle.textContent = title;
+  emsg.textContent = msg;
+  errmodal.classList.toggle('is-error', !!isError);
+  errmodal.style.display = 'flex';
+}
+document.getElementById('eclose').addEventListener('click', () => errmodal.style.display = 'none');
+errmodal.addEventListener('click', e => { if (e.target === errmodal) errmodal.style.display = 'none'; });
+
+// ---- markdown (escape-first, safe; subset the answer model emits) ----
+function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function mdInline(s) {
+  return s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>').replace(/`([^`]+)`/g,'<code>$1</code>');
+}
+function renderMarkdown(text) {
+  const lines = escapeHtml(text || '').split('\n');
+  let html = '', inList = false, para = [];
+  const closeList = () => { if (inList) { html += '</ul>'; inList = false; } };
+  const flushPara = () => { if (para.length) { html += '<p>' + mdInline(para.join(' ')) + '</p>'; para = []; } };
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, ''); let m;
+    if (/^\s*$/.test(line)) { flushPara(); closeList(); continue; }
+    if ((m = line.match(/^(#{1,3})\s+(.*)/))) { flushPara(); closeList(); const l = m[1].length; html += `<h${l}>${mdInline(m[2])}</h${l}>`; continue; }
+    if ((m = line.match(/^\s*[-*]\s+(.*)/))) { flushPara(); if (!inList) { html += '<ul>'; inList = true; } html += '<li>' + mdInline(m[1]) + '</li>'; continue; }
+    para.push(line);
+  }
+  flushPara(); closeList();
+  return html;
+}
+
+// The answer model writes its own trailing References list; the UI shows a
+// clickable References block instead, so strip the model's to avoid duplication.
+function stripReferences(md) {
+  return (md || '').replace(/\n[ \t]*#{0,6}[ \t]*\*{0,2}\s*(References|출처)\s*\*{0,2}[ \t]*\n[\s\S]*$/i, '').trimEnd();
+}
+
+// ---- reusable renderers (shared by live streaming and restore) ----
+function updateFades(g) {
+  g.classList.toggle('fade-left', g.scrollLeft > 4);
+  g.classList.toggle('fade-right', g.scrollLeft + g.clientWidth < g.scrollWidth - 4);
+}
+function renderGallery(parent, items) {
+  if (!items || !items.length) return;
+  const g = el('gallery', parent);
+  items.forEach(it => {
+    const fig = el('fig', g);
+    const img = document.createElement('img');
+    img.src = it.url; img.alt = it.section || '';
+    img.addEventListener('click', () => zoom(it));
+    img.addEventListener('load', () => updateFades(g));  // remeasure once images size
+    fig.appendChild(img);
+    const num = (it.title && (it.title.match(/FIGURE\s+[\d.]+/i) || [])[0]) || '';
+    el('cap', fig, (num || `§${it.section}`) + ` · p.${it.page}`);
+  });
+  g.addEventListener('scroll', () => updateFades(g), { passive: true });
+  // vertical wheel → horizontal scroll (mouse users), animated via scroll-behavior:smooth
+  g.addEventListener('wheel', e => {
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { g.scrollLeft += e.deltaY; e.preventDefault(); }
+  }, { passive: false });
+  window.addEventListener('resize', () => updateFades(g));
+  requestAnimationFrame(() => updateFades(g));
+}
+function renderSources(parent, items, images) {
+  if (!items || !items.length) return;
+  const box = el('sources', parent);
+  el('', box, 'References');
+  items.forEach(s => {
+    const line = el('src clickable' + (s.injected ? ' inj' : ''), box);
+    line.textContent = s.marker + (s.injected ? '  [이미지]' : '');
+    line.title = '클릭하여 출처 내용 보기';
+    const img = s.injected ? (images || []).find(i => i.marker === s.marker) : null;
+    line.addEventListener('click', () => showSource(s, img || null));
+  });
+}
+function showSource(s, img) {
+  etitle.textContent = '출처 내용';
+  errmodal.classList.remove('is-error');
+  emsg.innerHTML = '';
+  if (img) {
+    const im = document.createElement('img'); im.className = 'srcimg'; im.src = img.url;
+    im.addEventListener('click', () => zoom(img));
+    emsg.appendChild(im);
+  }
+  const body = document.createElement('div'); body.textContent = s.content || s.marker;
+  emsg.appendChild(body);
+  errmodal.style.display = 'flex';
+}
+
+// (section,page) key for matching a model reference label to a [src:] marker
+function secPage(s) {
+  s = s || '';
+  const sec = (s.match(/§\s*(.+?)\s*(?:\||,|\sp\.|$)/i) || s.match(/—\s*(.+?),\s*p\./i) || [])[1] || '';
+  const pg = (s.match(/p\.\s*(\d+)/i) || [])[1] || '';
+  return sec.trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 40) + '#' + pg;
+}
+// split answer into body + the model's numbered References [{n,label}]
+function parseAnswer(text) {
+  const m = (text || '').match(/\n[ \t]*#{0,6}[ \t]*\*{0,2}\s*(References|출처)\s*\*{0,2}[ \t]*\n([\s\S]*)$/i);
+  if (!m) return { body: (text || '').trimEnd(), refs: [] };
+  const refs = [];
+  m[2].split('\n').forEach(line => {
+    const r = line.match(/^\s*[-*]?\s*\[(\d+)\]\s*(.+?)\s*$/);
+    if (r) refs.push({ n: +r[1], label: r[2] });
+  });
+  return { body: text.slice(0, m.index).trimEnd(), refs };
+}
+let turnUid = 0;
+// render the finished answer: body with clickable [n] footnotes, numbered
+// References, and a "기타 출처" section for retrieved-but-not-cited sources.
+function finalizeAnswer(asst, answerEl, answerText, sources, images) {
+  const uid = ++turnUid;
+  const { body, refs } = parseAnswer(answerText);
+  if (!answerEl) answerEl = el('answer', asst);
+
+  const byKey = {}; (sources || []).forEach(s => { if (!(secPage(s.marker) in byKey)) byKey[secPage(s.marker)] = s; });
+  const findImg = mk => (images || []).find(i => i.marker === mk) || null;
+  const usedKeys = new Set();
+
+  // Frontend renumbering: the model's [n] are unreliable (sometimes all [1]).
+  // Number distinct reference entries sequentially; map model n -> display num.
+  // dedupe by (section, page) so the same source counts once even if the model
+  // labels it with different text (e.g. "p.17" vs "p.17-18") or different numbers.
+  const numMap = {}, keyNum = {}, ordered = [];
+  let next = 1;
+  refs.forEach(r => {
+    const key = secPage(r.label);
+    let num = keyNum[key];
+    if (num == null) { num = next++; keyNum[key] = num; ordered.push({ num, label: r.label }); }
+    if (!(r.n in numMap)) numMap[r.n] = num;
+  });
+
+  // body: relabel + linkify [n] footnotes to their reference anchor
+  let html = renderMarkdown(body);
+  if (ordered.length) {
+    html = html.replace(/\[(\d+)\]/g, (mm, n) => {
+      const num = numMap[n] || n;
+      return `<sup class="fn"><a href="#" data-ref="ref-${uid}-${num}">[${num}]</a></sup>`;
+    });
+  }
+  answerEl.innerHTML = html;
+  answerEl.querySelectorAll('.fn a').forEach(a => a.addEventListener('click', e => {
+    e.preventDefault();
+    const tgt = document.getElementById(a.dataset.ref);
+    if (tgt) { tgt.scrollIntoView({ behavior: 'smooth', block: 'center' });
+               tgt.classList.add('flash'); setTimeout(() => tgt.classList.remove('flash'), 1200); }
+  }));
+
+  if (ordered.length) {
+    const box = el('sources', asst);
+    ordered.forEach(o => {
+      const key = secPage(o.label); usedKeys.add(key);
+      const src = byKey[key] || { marker: o.label, content: '', injected: false };
+      const line = el('src clickable', box);
+      line.id = `ref-${uid}-${o.num}`;
+      line.textContent = `[${o.num}] ${o.label}`;
+      line.addEventListener('click', () => showSource(src, src.injected ? findImg(src.marker) : null));
+    });
+  } else if (sources && sources.length) {
+    renderSources(asst, sources, images);  // fallback: flat clickable list
+    return;
+  }
+
+  const others = (sources || []).filter(s => !usedKeys.has(secPage(s.marker)));
+  if (others.length) {
+    const det = document.createElement('details'); det.className = 'sources etc';
+    const sum = document.createElement('summary'); sum.textContent = `further references (${others.length})`;
+    det.appendChild(sum);
+    others.forEach(s => {
+      const line = el('src clickable' + (s.injected ? ' inj' : ''), det);
+      line.textContent = s.marker + (s.injected ? '  [이미지]' : '');
+      line.addEventListener('click', () => showSource(s, s.injected ? findImg(s.marker) : null));
+    });
+    asst.appendChild(det);
+  }
+}
+
+// render a finished/persisted turn (no streaming)
+function renderRecord(rec) {
+  const turn = el('turn', chat);
+  el('user', turn, rec.question);
+  const asst = el('asst', turn);
+  if (rec.reasoning) {
+    const det = document.createElement('details'); det.className = 'reasoning';
+    const sum = document.createElement('summary'); sum.textContent = '추론 과정'; det.appendChild(sum);
+    el('body', det, rec.reasoning); asst.appendChild(det);
+  }
+  renderGallery(asst, rec.images);
+  if (rec.answer) finalizeAnswer(asst, null, rec.answer, rec.sources, rec.images);
+  if (rec.note) el(rec.noteClass || '', asst, rec.note);
+}
+
+// ---- live streaming turn ----
+function newTurn(question) {
+  const turn = el('turn', chat);
+  el('user', turn, question);
+  const asst = el('asst', turn);
+  const statusBlock = document.createElement('details');
+  statusBlock.className = 'status-block'; statusBlock.open = true;
+  const ssum = document.createElement('summary'); ssum.textContent = '진행 상황';
+  statusBlock.appendChild(ssum);
+  const statusBody = el('status-body', statusBlock);
+  asst.appendChild(statusBlock);
+  const t = { question, asst, statusBlock, statusBody,
+              gallery: null, reasoning: null, reasoningBody: null, reasoningText: '',
+              answerEl: null, answerText: '', images: [], sourcesData: [], note: null, noteClass: '' };
+  window.scrollTo(0, document.body.scrollHeight);
+  return t;
+}
+function addStatus(t, msg, detail) {
+  el('sline' + (detail ? ' detail' : ''), t.statusBody, '· ' + msg);
+  window.scrollTo(0, document.body.scrollHeight);
+}
+let renderQueued = false;
+function renderAnswer(t) {
+  if (renderQueued) return; renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; t.answerEl.innerHTML = renderMarkdown(stripReferences(t.answerText)); window.scrollTo(0, document.body.scrollHeight); });
+}
+function persist(t) {
+  turns.push({ question: t.question, reasoning: t.reasoningText, answer: t.answerText,
+               images: t.images, sources: t.sourcesData, note: t.note, noteClass: t.noteClass });
+  saveTurns();
+  // first turn of an untitled session -> derive the sidebar title from the question
+  const s = sessionList.find(x => x.id === activeId);
+  if (s && (!s.title || s.title === '새 대화') && turns.length) {
+    s.title = (turns[0].question || '새 대화').slice(0, 40);
+    saveSessions(); renderSidebar();
+  }
+}
+
+// ---- sidebar session management ----
+function renderSidebar() {
+  sessionsEl.innerHTML = '';
+  sessionList.forEach(s => {
+    const item = el('sess-item' + (s.id === activeId ? ' active' : ''), sessionsEl);
+    el('title', item, s.title || '새 대화');
+    const del = el('del', item, '×');
+    item.addEventListener('click', e => { if (e.target !== del) switchSession(s.id); });
+    del.addEventListener('click', e => { e.stopPropagation(); deleteSession(s.id); });
+  });
+}
+function switchSession(id) {
+  if (busy) return;            // don't switch mid-stream
+  activeId = id; localStorage.setItem(ACTIVE_KEY, id);
+  turns = loadJSON(tkey(id), []);
+  chat.innerHTML = '';
+  turns.forEach(renderRecord);
+  renderSidebar();
+  window.scrollTo(0, document.body.scrollHeight); qInput.focus();
+}
+function newSession() {
+  const id = newId();
+  sessionList.unshift({ id, title: '새 대화' });
+  saveSessions();
+  switchSession(id);
+}
+function deleteSession(id) {
+  localStorage.removeItem(tkey(id));
+  fetch('/api/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: id }) }).catch(() => {});
+  sessionList = sessionList.filter(s => s.id !== id);
+  saveSessions();
+  if (id === activeId) {
+    if (sessionList.length) switchSession(sessionList[0].id);
+    else newSession();
+  } else renderSidebar();
+}
+
+function handle(ev, t) {
+  switch (ev.type) {
+    case 'status':
+      addStatus(t, ev.msg, ev.detail); break;
+    case 'routing':
+      el('badge', t.asst, `검색 ${ev.needs_retrieval ? '필요' : '불필요'} · 추론 강도 ${ev.effort}`); break;
+    case 'images':
+      t.images = t.images.concat(ev.items); renderGallery(t.asst, ev.items); break;
+    case 'reasoning':
+      if (!t.reasoning) {
+        t.reasoning = document.createElement('details'); t.reasoning.className = 'reasoning';
+        t.reasoning.open = true;  // visible while reasoning streams
+        const sum = document.createElement('summary'); sum.textContent = '추론 과정'; t.reasoning.appendChild(sum);
+        t.reasoningBody = el('body', t.reasoning); t.asst.appendChild(t.reasoning);
+      }
+      t.reasoningText += ev.delta; t.reasoningBody.textContent = t.reasoningText;
+      window.scrollTo(0, document.body.scrollHeight); break;
+    case 'answer':
+      if (!t.answerEl) {
+        t.answerEl = el('answer', t.asst);
+        // collapse the search-process + reasoning panels once the main answer begins
+        if (t.statusBlock) t.statusBlock.open = false;
+        if (t.reasoning) t.reasoning.open = false;
+      }
+      t.answerText += ev.delta; renderAnswer(t); break;
+    case 'sources':
+      t.sourcesData = ev.items; break;   // rendered at 'done' (footnotes + 기타 출처)
+    case 'clarify':
+      t.note = '· 질문을 좀 더 구체화해 주세요: ' + ev.question; t.noteClass = 'clarify';
+      el('clarify', t.asst, t.note); persist(t); break;
+    case 'decline':
+      t.note = ev.msg; t.noteClass = 'decline';
+      el('decline', t.asst, ev.msg); persist(t); break;
+    case 'done':
+      if (t.answerEl) finalizeAnswer(t.asst, t.answerEl, t.answerText, t.sourcesData, t.images);
+      if (ev.summarized) addStatus(t, `인용된 근거 ${ev.cited}개를 기억에 추가`, false);
+      if (t.statusBlock) t.statusBlock.open = false;
+      persist(t); break;
+    case 'fallback':
+      el('badge', t.asst, `[대체] ${ev.from} 실패 -> ${ev.to}`);
+      showModal('모델 대체 안내', `${ev.from} 응답이 실패하여 ${ev.to} 모델로 대체합니다.\n\n사유: ${ev.reason}`, false);
+      break;
+    case 'error':
+      el('err', t.asst, '오류: ' + ev.msg);
+      showModal('오류가 발생했습니다', ev.msg, true);
+      break;
+  }
+}
+
+function renderQueue() {
+  qlist.innerHTML = '';
+  queue.forEach((q, i) => {
+    const d = el('qitem', qlist, `${i + 1}. ${q}`);  // first-in on top (FIFO)
+    d.title = q;
+  });
+}
+async function ask(question) {
+  if (!question.trim()) return;
+  if (busy) { queue.push(question); renderQueue(); return; }  // queue while a turn streams
+  busy = true;
+  const t = newTurn(question);
+  try {
+    const resp = await fetch('/api/ask', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, session_id: activeId }),
+    });
+    const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        const frame = buf.slice(0, i); buf = buf.slice(i + 2);
+        if (frame.startsWith('data: ')) handle(JSON.parse(frame.slice(6)), t);
+      }
+    }
+  } catch (e) {
+    el('err', t.asst, '연결 오류: ' + e);
+    showModal('연결 오류', String(e), true);
+  } finally {
+    busy = false;
+    if (queue.length) {            // run the next queued question right away
+      const next = queue.shift();
+      renderQueue();
+      ask(next);
+    } else {
+      renderQueue();
+      qInput.focus();
+    }
+  }
+}
+
+function submit() { const q = qInput.value; qInput.value = ''; ask(q); }
+sendBtn.addEventListener('click', submit);
+qInput.addEventListener('keydown', e => {
+  // !e.isComposing: ignore the Enter that commits an IME (Korean/CJK) composition,
+  // otherwise the last composing character is submitted twice.
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); }
+});
+document.getElementById('reset').addEventListener('click', newSession);
+document.querySelector('.titlewrap h1').addEventListener('click', newSession);
+
+// sidebar show/hide — default hidden, click the ≡ toggle to open (persisted)
+const SIDEBAR_KEY = 'gr_sidebar_hidden';
+function applySidebar() {
+  document.body.classList.toggle('nosidebar', localStorage.getItem(SIDEBAR_KEY) !== '0');
+}
+document.getElementById('sidetoggle').addEventListener('click', () => {
+  const nowHidden = document.body.classList.contains('nosidebar');
+  localStorage.setItem(SIDEBAR_KEY, nowHidden ? '0' : '1');
+  applySidebar();
+});
+applySidebar();
+
+// build preset cards (vertical, full-width, with full query text)
+const presetsEl = document.getElementById('presets');
+PRESETS.forEach(p => {
+  const b = document.createElement('button'); b.className = 'preset';
+  b.innerHTML = `<span class="tier">${p.tier}</span><span class="ptitle">${p.title}</span><span class="pfull"></span>`;
+  b.querySelector('.pfull').textContent = p.q;
+  b.addEventListener('click', () => { document.getElementById('presetbox').open = false; ask(p.q); });
+  presetsEl.appendChild(b);
+});
+
+// ---- boot: ensure a session exists, restore sidebar + active transcript ----
+if (!sessionList.length) {
+  // migrate the legacy single-conversation store, if present
+  const legacy = loadJSON('gr_chat_v1', []);
+  const id = newId();
+  sessionList = [{ id, title: legacy.length ? (legacy[0].question || '새 대화').slice(0, 40) : '새 대화' }];
+  saveSessions();
+  if (legacy.length) localStorage.setItem(tkey(id), JSON.stringify(legacy));
+  activeId = id;
+}
+if (!activeId || !sessionList.find(s => s.id === activeId)) activeId = sessionList[0].id;
+localStorage.setItem(ACTIVE_KEY, activeId);
+renderSidebar();
+turns = loadJSON(tkey(activeId), []);
+turns.forEach(renderRecord);
+window.scrollTo(0, document.body.scrollHeight);
+qInput.focus();
+</script>
+</body>
+</html>
