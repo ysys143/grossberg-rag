@@ -37,7 +37,10 @@ Reply with ONLY a JSON object, no prose, no markdown fences:
 {"relevant": [<indices>]}
 
 - indices: the 0-based indices of directly-relevant figures, most relevant first.
-- Be strict: return [] if no figure genuinely needs to be seen. Prefer fewer.
+- Include ALL figures that are directly relevant — if several figures illustrate
+  the asked phenomenon or mechanism, include them all (they reinforce the answer).
+  Still EXCLUDE figures that are only tangentially or topically related. Return []
+  only if none genuinely help. The list is capped, so don't pad with marginal figures.
 """
 
 

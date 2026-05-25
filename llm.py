@@ -612,6 +612,15 @@ async def openai_generate_stream(
                         elif event == "response.completed":
                             # final event carries totals incl. input_tokens_details.cached_tokens
                             usage = data.get("response", {}).get("usage")
+                        elif event in ("error", "response.failed"):
+                            # Responses API can stream a failure (HTTP 200) — e.g.
+                            # insufficient_quota. Surface it instead of returning a
+                            # silently-empty answer.
+                            err = (data.get("error")
+                                   or data.get("response", {}).get("error") or {})
+                            raise RuntimeError(
+                                f"OpenAI stream failed: {err.get('code', '?')}: {err.get('message', '')}"
+                            )
     except Exception as e:
         await _log_stream_summary(
             "openai_generate_stream", model, prompt, reasoning_buf, answer_buf,
