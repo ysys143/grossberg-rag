@@ -127,6 +127,12 @@ def _purge_lightrag_doc_status(working_dir: Path, file_hash: str) -> None:
         doc_status_path.write_text(json.dumps(data, indent=2))
 
 
+def _stage(msg: str) -> None:
+    """Flushed, timestamped stage marker so progress is visible in real time even
+    when stdout is redirected to a file (block-buffered)."""
+    print(f"[{datetime.now():%H:%M:%S}] STAGE: {msg}", flush=True)
+
+
 async def ingest(force: bool = False, pdf_override: Path | None = None):
     pdf_path = pdf_override or Path(_cfg["pdf"]["path"])
     suffix = f"_{pdf_path.stem}" if pdf_override else ""
@@ -200,18 +206,30 @@ async def ingest(force: bool = False, pdf_override: Path | None = None):
         # parse → enrich with (document, section, page) source markers → insert.
         # Splitting parse/insert lets us inject citation metadata into each block
         # before LightRAG chunks it (process_document_complete would skip this).
+        # Per-stage timing (flushed) so a slow run shows WHICH stage is slow —
+        # parse(MinerU) vs insert(vision desc + KG extract + embed) — instead of guessing.
+        _stage("PARSE start (MinerU)")
+        t = time.monotonic()
         content_list, doc_id = await rag.parse_document(
             file_path=str(pdf_path),
             output_dir=str(output_dir),
             parse_method=p["method"],
         )
+        _stage(f"PARSE done in {time.monotonic() - t:.1f}s — {len(content_list)} blocks, "
+               f"{sum(1 for b in content_list if b.get('type') == 'image')} images")
+
+        _stage("ENRICH (inject citation markers)")
         content_list = enrich_content_list(content_list, doc_name_for(pdf_path))
+
+        _stage("INSERT start (vision desc + KG extract + embed)")
+        t = time.monotonic()
         await rag.insert_content_list(
             content_list,
             file_path=pdf_path.name,
             doc_id=doc_id,
             display_stats=True,
         )
+        _stage(f"INSERT done in {time.monotonic() - t:.1f}s")
     elapsed = time.monotonic() - t0
 
     _wal_complete(working_dir, file_hash)
