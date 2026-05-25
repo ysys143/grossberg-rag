@@ -43,9 +43,9 @@ from rerank import rerank as rerank_oneshot, rerank_batched
 import llm
 import tracing
 
-# Quiet LightRAG/vectordb INFO noise (its logger is set to INFO at import above) —
-# we surface clean Korean status lines instead. Must run AFTER the lightrag import.
-for _name in ("lightrag", "nano-vectordb", "nano_vectordb", "httpx", "httpcore"):
+# Pure-noise loggers stay silenced; the lightrag logger is re-routed to a Korean
+# status handler below (after the color constants it depends on are defined).
+for _name in ("nano-vectordb", "nano_vectordb", "httpx", "httpcore"):
     logging.getLogger(_name).setLevel(logging.WARNING)
 
 tracing.init_tracing("grossberg-rag")
@@ -61,6 +61,46 @@ _MARKER = "\n\n---User Query---\n\n"
 _RERANK_FUNCS = {"none": None, "oneshot": rerank_oneshot, "batched": rerank_batched}
 _HISTORY_TURNS = 6  # how many prior turns LightRAG folds into retrieval/context
 _SUMMARIZE_MODEL = "gemini-3.1-flash-lite"  # cheap, thinking-off summarizer
+
+
+# Re-route LightRAG's English INFO logs to richer Korean status lines. Storage-init
+# noise (graph load, KV load, worker init) is dropped; only query-stage messages map.
+_LR_MAP = [
+    (re.compile(r"Query nodes: (.+?) \(top_k"), lambda m: f"엔티티 검색 키워드: {m.group(1)}"),
+    (re.compile(r"Query edges: (.+?) \(top_k"), lambda m: f"관계 검색 키워드: {m.group(1)}"),
+    (re.compile(r"Local query: (\d+) entites?, (\d+) relations"),
+     lambda m: f"지역 검색(엔티티 중심): 엔티티 {m.group(1)}개, 관계 {m.group(2)}개"),
+    (re.compile(r"Global query: (\d+) entites?, (\d+) relations"),
+     lambda m: f"전역 검색(관계 중심): 엔티티 {m.group(1)}개, 관계 {m.group(2)}개"),
+    (re.compile(r"Raw search results: (\d+) entities, (\d+) relations, (\d+) vector chunks"),
+     lambda m: f"원시 검색 결과: 엔티티 {m.group(1)}개, 관계 {m.group(2)}개, 벡터청크 {m.group(3)}개"),
+    (re.compile(r"After truncation: (\d+) entities, (\d+) relations"),
+     lambda m: f"토큰 한도 적용 후: 엔티티 {m.group(1)}개, 관계 {m.group(2)}개"),
+    (re.compile(r"Round-robin merged chunks: (\d+) -> (\d+) \(deduplicated (\d+)\)"),
+     lambda m: f"청크 병합: {m.group(1)} → {m.group(2)}개 (중복 {m.group(3)}개 제거)"),
+    (re.compile(r"Successfully reranked: (\d+) chunks from (\d+) original chunks"),
+     lambda m: f"관련도 재정렬: {m.group(2)}개 → {m.group(1)}개"),
+    (re.compile(r"Final context: (\d+) entities, (\d+) relations, (\d+) chunks"),
+     lambda m: f"최종 컨텍스트: 엔티티 {m.group(1)}개, 관계 {m.group(2)}개, 청크 {m.group(3)}개"),
+]
+
+
+class _KoreanStatusHandler(logging.Handler):
+    def emit(self, record):
+        msg = record.getMessage()
+        for pat, fn in _LR_MAP:
+            m = pat.search(msg)
+            if m:
+                print(f"{_DIM}·   {fn(m)}{_RESET}")
+                return
+        # unmatched LightRAG INFO (storage init etc.) -> dropped
+
+
+_lr_logger = logging.getLogger("lightrag")
+_lr_logger.handlers.clear()            # drop LightRAG's English console handler
+_lr_logger.addHandler(_KoreanStatusHandler())
+_lr_logger.setLevel(logging.INFO)
+_lr_logger.propagate = False
 
 
 async def _summarize_cited(question: str, cited: list[str]) -> str:
@@ -135,10 +175,8 @@ class ChatSession:
                 assembled.split(_MARKER, 1) if _MARKER in assembled else (assembled, question)
             )
             self.last_sources = _extract_sources(sys_prompt)
-            ent, rel, chunk = _count_retrieved(sys_prompt)
-            print(f"{_DIM}· 근거를 찾았습니다 — 엔티티 {ent}개, 관계 {rel}개, 청크 {chunk}개{_RESET}")
-            if fn is not None:
-                print(f"{_DIM}· 관련도 순으로 재정렬({self.rerank_mode})했습니다{_RESET}")
+            # (detailed retrieval/rerank stages are surfaced in Korean by the
+            #  _KoreanStatusHandler that intercepts LightRAG's logs above)
             print(f"{_DIM}· {self.provider} 모델로 답변을 생성하고 있습니다...{_RESET}\n")
 
             print(f"{_DIM}[Reasoning]{_RESET}")
@@ -176,20 +214,6 @@ class ChatSession:
 class _nullctx:
     def __enter__(self): return None
     def __exit__(self, *a): return False
-
-
-def _count_retrieved(sys_prompt: str) -> tuple[int, int, int]:
-    """(entities, relations, chunks) counts from the assembled context blocks."""
-    def _n(label_a: str, label_b: str | None = None) -> int:
-        i = sys_prompt.find(label_a)
-        if i < 0:
-            return 0
-        j = sys_prompt.find(label_b, i) if label_b else len(sys_prompt)
-        return sum(1 for ln in sys_prompt[i:j].splitlines() if ln.strip().startswith("{"))
-    ent = _n("Knowledge Graph Data (Entity)", "Knowledge Graph Data (Relationship)")
-    rel = _n("Knowledge Graph Data (Relationship)", "Document Chunks")
-    chunk = _n("Document Chunks", "Reference Document List")
-    return ent, rel, chunk
 
 
 def _extract_sources(sys_prompt: str) -> list[str]:
