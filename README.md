@@ -38,11 +38,11 @@ Grossberg *Conscious Mind, Resonant Brain* 4장(62p)의 멀티모달 RAG. 단일
 |------|------|
 | `config.yaml` | 모델·경로·파서 설정의 단일 출처 |
 | `llm.py` | Gemini/OpenAI HTTP 클라이언트. 비스트리밍 + 스트리밍 변형, 추론 토큰 캡처, `cachedContents`, 사용량 로깅 |
-| `embedding.py` | Gemini `batchEmbedContents` 단일 함수 |
-| `models.py` | LightRAG가 기대하는 콜백 시그니처에 맞춰 LLM/Vision/Embedding/Answer 함수 조립. provider 라우팅과 style prompt prepending도 여기서 처리 |
+| `embedding.py` | Gemini `batchEmbedContents`. 동시성 throttle(세마포어) + 429 백오프 + 에러 키 마스킹 |
+| `models.py` | LightRAG 콜백(LLM/Vision/Embedding/Answer) 조립. provider 라우팅·style prepend·effort 실현. `vision_model_func`는 RAGAnything의 `image_data`를 forward(§4.20 버그 픽스) |
 | `rerank.py` | LLM 기반 reranker. `rerank()`(one-shot) / `rerank_batched()`(two-stage) |
 | `prompts/answer_system.md` | 응답 톤·언어·포맷 가이드(교체 가능) |
-| `ingest.py` | 문서 인덱싱 CLI. WAL로 멱등성/충돌 복구. parse→enrich→insert로 출처 마커 주입 |
+| `ingest.py` | 문서 인덱싱 CLI. WAL 멱등성/복구, 단계 타이밍 로깅, `--force`는 `adelete_by_doc_id`로 cascade purge(중복 방지). parse→enrich→insert |
 | `query.py` | 단일 질의 모드. `only_need_prompt=True`로 retrieval/answer 분리 |
 | `chat.py` | 대화형(멀티턴) 검색 CLI. `conversation_history`로 follow-up 맥락 유지 + 라우터/명료화 게이트/이미지 주입 + 런타임 `/provider`·`/rerank`·`/sources` 명령 |
 | `router.py` | 질의 전(前) 분류기(flash-lite). 범위(in_scope)·검색 필요 여부·추론 강도(effort)·명료화 필요 여부를 1콜로 판정. fail-open |
@@ -50,6 +50,7 @@ Grossberg *Conscious Mind, Resonant Brain* 4장(62p)의 멀티모달 RAG. 단일
 | `ab_test.py` | 동일 질문을 `none`/`oneshot`/`batched` 세 모드로 돌리고 비교 |
 | `cite.py` | content_list에 `[src: 문서 \| §섹션 \| p.페이지]` 출처 마커 주입 (page_idx + text_level 활용) |
 | `tracing.py` | Arize AX OpenInference 트레이싱. SDK 없는 HTTP 호출용 manual span (LLM/EMBEDDING/RETRIEVER/RERANKER/CHAIN) + 멀티모달 이미지 블록 |
+| `measure_caption_divergence.py` | read-only 검증 도구. 저장된 캡션 vs 원본 이미지를 강한 vision 모델로 판정해 발산 점수화(인제스션 로직 아님) |
 
 ---
 
@@ -94,7 +95,11 @@ Grossberg *Conscious Mind, Resonant Brain* 4장(62p)의 멀티모달 RAG. 단일
 | 33 | "flash-lite 디폴트로 하되 모델은 config.yaml에서" | `router.model` 설정화, 기본 flash-lite |
 | 34 | "모호한 질문이면 멈추고 되묻는 HITL 게이트" | 라우터에 `needs_clarification` 통합(추가 콜 0) + `pending_question` 1라운드 상한 (4.18) |
 | 35 | "검색 관련 이미지를 쿼리 시점 컨텍스트로 주입, 불필요하면 가차없이 제외, 인용 명시" | `image_gate.py` 관련성 게이트 + 멀티모달 픽셀 주입 + References `(Figure)` 공개 (4.19) |
-| 36 | "쿼리 시점 먼저 구현·검증 후 재인제스트, config 제어, text-only 모델이면 폴백+경고" | `query.inject_images` 토글 + `vision_models` 안전 가드, 재인제스트는 §8 향후 작업 |
+| 36 | "쿼리 시점 먼저 구현·검증 후 재인제스트, config 제어, text-only 모델이면 폴백+경고" | `query.inject_images` 토글 + `vision_models` 안전 가드 (4.19) |
+| 37 | "처리단계 로깅 로직을 수정해라 / 추측 그만" | `ingest.py` `_stage()` flush 단계 타이밍 → 추측 대신 PARSE/INSERT 직접 계측 (4.20) |
+| 38 | "프롬프트나 effort도 의심 / mineru 안 느려" → 측정 결과 진짜 원인 발견 | `vision_model_func`가 `image_data`를 drop하던 배선 버그 픽스 — 캡션이 이미지 기반으로 정확해짐 (4.20) |
+| 39 | "--force가 옛 청크를 안 지웠다니" | `adelete_by_doc_id` cascade purge로 교체 → 중복 0 (4.20) |
+| 40 | "throttle도 추가 / 동시성 상한 너무 빡세다" | 임베딩 세마포어(기본 8) + 429 백오프 + 키 마스킹 (4.20) |
 
 ---
 
@@ -202,11 +207,17 @@ Grossberg *Conscious Mind, Resonant Brain* 4장(62p)의 멀티모달 RAG. 단일
 - HITL 상태는 `pending_question`으로 유지. 다음 입력을 보충 설명으로 병합해 `skip_clarify=True`로 재실행 — **1라운드 상한**으로 무한 되묻기 방지.
 
 ### 4.19 **쿼리 시점 이미지 재주입 (chat.py + image_gate.py)**
-- 인제스트 시 figure는 flash-lite가 **텍스트 설명**으로 변환돼 청크가 되고, 그 설명이 검색 키이자 답변 컨텍스트 본문이 됨. 복잡한 다이어그램(예: 색 부호화된 회로도)에서 이 캡션이 사실과 어긋나면("흑백"이라 오기, 구조 날조) 답변 모델이 틀린 전제로 추론·인용하는 **캡션 천장** 문제가 생김.
-- 해결: 검색 후 retrieve된 figure 중 **질의와 직접 관련된 것만** `image_gate`(flash-lite)로 선별(≤ `max_injected_images`, 없으면 0개)하고, 그 **원본 픽셀**을 멀티모달 답변 모델에 주입. 모델이 잘못된 캡션을 실제 이미지로 덮어씀. 관련 없는 figure는 주입에서 가차없이 제외.
+- 인제스트 시 figure는 flash-lite가 **텍스트 설명**으로 변환돼 청크가 되고, 그 설명이 검색 키이자 답변 컨텍스트 본문이 됨. (주의: 한때 이 캡션이 색·구조를 틀리는 "캡션 천장" 문제가 있었으나, 그 원인은 vision 모델 한계가 아니라 **§4.20의 배선 버그**였고 수정됨. 지금 캡션은 이미지 기반으로 정확.)
+- 그럼에도 깊은 시각 추론(세밀한 공간 배치·화살표 방향 등 캡션이 못 담는 디테일)에는 **원본 픽셀**이 유용. 검색 후 retrieve된 figure 중 **질의와 직접 관련된 것만** `image_gate`(flash-lite)로 선별(≤ `max_injected_images`, 없으면 0개)해 멀티모달 답변 모델에 주입. 관련 없는 figure는 가차없이 제외.
 - **fail-closed**: 게이트 오류 시 이미지 0개(텍스트 전용으로 폴백) — 이미지는 보강일 뿐 필수 컨텍스트가 아니므로 라우터와 반대 방향.
 - **안전 가드**: `inject_images=true`인데 활성 답변 모델이 `vision_models`에 없으면 주입 취소·텍스트 전용 진행·경고 안내.
 - **출처 공개**: 주입된 figure의 `[src:…|image]` 마커를 추적(`last_image_sources`)하고 answer 프롬프트가 References에 `(Figure)`로 명시하도록 지시. `/sources`는 주입된 이미지를 라벨로 표시. 인제스트를 다시 돌리지 않는 query-time 방식(임베딩 불변).
+
+### 4.20 **Vision `image_data` 배선 버그 + 인제스트 견고성**
+- **근본 버그(수정됨)**: RAGAnything 모달 프로세서는 figure를 `modal_caption_func(prompt, image_data=<base64>)`로 넘기는데, `models.vision_model_func`는 `images`/`messages`만 처리하고 `image_data`를 `**kwargs`로 **조용히 버렸음.** 그래서 인제스트 내내 모델이 **이미지 없이** 캡션을 생성 → figure 캡션·텍스트 figure 메타가 환각이었음(유명 자극은 캡션 텍스트로 얼추 맞고, 색 부호화 다이어그램은 "흑백"으로 오기). 프레임워크 결함이 아니라 **어댑터 규약 불일치 + `**kwargs` 침묵**이 원인. 수정: `image_data`를 data-URI로 forward → flash-lite가 이미지를 실제로 봄(검증: FIGURE 4.55 색 정확).
+- **단계 타이밍 로깅(ingest.py)**: `_stage()`가 PARSE/ENRICH/INSERT 전환을 flush해 찍음. stdout 블록 버퍼링 + 단계 로깅 부재로 "어느 단계가 느린지" 추측하던 문제 해소(예: PARSE=MinerU 235s vs INSERT=vision+KG 811s를 직접 분리).
+- **`--force` cascade purge(ingest.py)**: 기존 `_purge`는 `doc_status`만, 그것도 틀린 doc-id로 건드려 **아무것도 안 지웠음** → 재처리 시 옛 청크 위에 새것이 덧쌓여 **중복**(이미지 청크 116=58옛+58새). 수정: parse 후 `lightrag.adelete_by_doc_id(doc_id, delete_llm_cache=True)`로 청크·벡터·엔티티·관계를 연쇄 삭제 후 재삽입 → 재처리가 깔끔히 교체(검증: 재인제스트 결과 58청크, 중복 0).
+- **임베딩 throttle(embedding.py)**: 벌크 재인제스트가 수백 임베딩을 동시 호출해 429 다발 → 세마포어 상한(`models.embedding_concurrency`, 기본 8) + 지수 백오프. 429 17→4로 감소. 보너스로 에러 메시지의 `?key=` API 키 **마스킹**(로그 유출 차단).
 
 ---
 
@@ -269,6 +280,7 @@ models:
   embedding: gemini-embedding-2   # 3072-dim
   embedding_dim: 3072
   embedding_max_tokens: 8191
+  embedding_concurrency: 8        # 동시 임베딩 호출 상한 (429 가드, §4.20)
   answer:
     provider: openai              # openai | gemini (CLI --provider로 override)
     openai: gpt-5.5               # Responses API + reasoning stream
@@ -320,7 +332,7 @@ jq -s '[.[] | select(.usage.promptTokenCount)] | {total_prompt: (map(.usage.prom
 - **단일 문서 corpus**: 다중 문서 추가 시 reranker의 가치가 크게 올라갈 것으로 예상.
 - **Reranker accuracy**: 더 다양한 어려운 질의 집합으로 통계적 검증 필요.
 - **README가 첫 사용자 친화적이지 않음**: 학습 노트 성격이라 신규 사용자는 별도 quickstart 필요.
-- **선별 재인제스트 (캡션 천장 근본 해결)**: 4.19는 query-time 보정이고, 근본 해결은 복잡한 figure(다이어그램·회로도·색 부호화)만 골라 강한 vision 모델로 재인제스트하는 것. flash-lite 인제스트 콜에 `figure_type`·`structural_complexity`·`uses_color_coding`을 함께 뱉게 해(추가 콜 0) 승급 대상을 판정하고, 캡션-vs-원본 diff로 figure 타입별 발산을 측정해 임계값을 보정 예정.
+- **~~선별 재인제스트(pro 승급)~~ — 불필요로 판명**: 한때 "캡션 천장"을 vision 모델 한계로 보고 복잡 figure만 pro로 재인제스트하려 했으나, 측정 결과 진짜 원인은 §4.20의 `image_data` 배선 버그였음. flash-lite는 **이미지만 제대로 받으면 충분** → pro 승급·복잡도 triage·색 라우터 전부 불필요. (`measure_caption_divergence.py`는 그 회귀 검증용 read-only 도구로 남김 — 단 58장 동시 호출 시 타임아웃이 있어 throttle 보강 필요.)
 
 ---
 
