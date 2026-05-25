@@ -25,10 +25,6 @@ import re
 import sys
 from pathlib import Path
 
-# Quiet LightRAG/vectordb INFO noise — we surface clean Korean status lines instead.
-for _name in ("lightrag", "nano-vectordb", "nano_vectordb", "httpx", "httpcore"):
-    logging.getLogger(_name).setLevel(logging.WARNING)
-
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -41,6 +37,11 @@ from models import llm_model_func, embedding_func, answer_model_stream, ANSWER_P
 from rerank import rerank as rerank_oneshot, rerank_batched
 import llm
 import tracing
+
+# Quiet LightRAG/vectordb INFO noise (its logger is set to INFO at import above) —
+# we surface clean Korean status lines instead. Must run AFTER the lightrag import.
+for _name in ("lightrag", "nano-vectordb", "nano_vectordb", "httpx", "httpcore"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
 
 tracing.init_tracing("grossberg-rag")
 _tracer = tracing.get_tracer()
