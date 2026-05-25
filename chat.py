@@ -34,6 +34,7 @@ from lightrag import LightRAG, QueryParam
 
 from models import llm_model_func, embedding_func, answer_model_stream, ANSWER_PROVIDER_DEFAULT
 from rerank import rerank as rerank_oneshot, rerank_batched
+import llm
 import tracing
 
 tracing.init_tracing("grossberg-rag")
@@ -45,6 +46,25 @@ _DIM, _BOLD, _CYAN, _GREEN, _RESET = "\033[2m", "\033[1m", "\033[36m", "\033[32m
 _MARKER = "\n\n---User Query---\n\n"
 _RERANK_FUNCS = {"none": None, "oneshot": rerank_oneshot, "batched": rerank_batched}
 _HISTORY_TURNS = 6  # how many prior turns LightRAG folds into retrieval/context
+_SUMMARIZE_MODEL = "gemini-3.1-flash-lite"  # cheap, thinking-off summarizer
+
+
+async def _summarize_cited(question: str, cited: list[str]) -> str:
+    """One-shot summary of the cited chunks for this turn (append-only history).
+
+    Keeps [src: ...] markers on the key facts so attribution survives into
+    follow-up turns. Uses the fast flash-lite model with thinking disabled.
+    """
+    joined = "\n\n".join(cited)
+    prompt = (
+        "Summarize these cited source excerpts into 1-2 sentences capturing the "
+        "key facts that answered the question. Preserve the [src: ...] marker for "
+        "each key fact. Output only the summary.\n\n"
+        f"Question: {question}\n\nCited excerpts:\n{joined}"
+    )
+    return await llm.generate(
+        model=_SUMMARIZE_MODEL, prompt=prompt, thinking_budget=0, temperature=0
+    )
 
 
 class ChatSession:
@@ -121,13 +141,16 @@ class ChatSession:
             if span is not None:
                 span.set_attribute("output.value", answer)
 
-        # Accumulate ONLY the chunks the answer actually cited (matched by page),
-        # never the verbose prose. Follow-up context = verified cited evidence.
+        # Append-only history: each turn stores a one-shot SUMMARY of its cited
+        # chunks (never the verbose prose, never rewritten later). Past turns stay
+        # frozen so the prompt prefix is stable -> provider prompt caching keeps
+        # working. The current turn's full evidence always comes from fresh
+        # retrieval, so summarizing the past loses no answer fidelity.
         cited = _cited_chunks(answer, sys_prompt)
-        carried = "Cited evidence:\n\n" + "\n\n".join(cited) if cited else "(no chunks cited)"
+        summary = await _summarize_cited(question, cited) if cited else "(no sources cited)"
         self.history.append({"role": "user", "content": question})
-        self.history.append({"role": "assistant", "content": carried})
-        print(f"{_DIM}(carried {len(cited)} cited chunk(s) into context){_RESET}")
+        self.history.append({"role": "assistant", "content": summary})
+        print(f"{_DIM}({len(cited)} cited chunks -> summary carried){_RESET}")
 
 
 class _nullctx:
