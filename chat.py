@@ -19,6 +19,7 @@ In-session commands:
   /exit (or Ctrl-D)     quit
 """
 import asyncio
+import json
 import re
 import sys
 from pathlib import Path
@@ -120,8 +121,13 @@ class ChatSession:
             if span is not None:
                 span.set_attribute("output.value", answer)
 
+        # Accumulate ONLY the chunks the answer actually cited (matched by page),
+        # never the verbose prose. Follow-up context = verified cited evidence.
+        cited = _cited_chunks(answer, sys_prompt)
+        carried = "Cited evidence:\n\n" + "\n\n".join(cited) if cited else "(no chunks cited)"
         self.history.append({"role": "user", "content": question})
-        self.history.append({"role": "assistant", "content": answer})
+        self.history.append({"role": "assistant", "content": carried})
+        print(f"{_DIM}(carried {len(cited)} cited chunk(s) into context){_RESET}")
 
 
 class _nullctx:
@@ -136,6 +142,44 @@ def _extract_sources(sys_prompt: str) -> list[str]:
         if m not in seen:
             seen.add(m)
             out.append(m)
+    return out
+
+
+def _cited_pages(answer: str) -> set[int]:
+    """Pages the answer cited: matches p.N and ranges p.N-M / p.N–M."""
+    pages: set[int] = set()
+    for a, b in re.findall(r"p\.\s*(\d+)\s*[-–]\s*(\d+)", answer):
+        pages.update(range(int(a), int(b) + 1))
+    for n in re.findall(r"p\.\s*(\d+)", answer):
+        pages.add(int(n))
+    return pages
+
+
+def _cited_chunks(answer: str, sys_prompt: str) -> list[str]:
+    """Return retrieved chunk contents whose [src: ... p.N] page was cited in the answer.
+
+    Page is the matching key — clean integers vs OCR-noisy section names. Parses the
+    Document Chunks NDJSON block from the assembled prompt.
+    """
+    pages = _cited_pages(answer)
+    if not pages:
+        return []
+    m = re.search(r"Document Chunks.*?```json\n(.*?)\n```", sys_prompt, re.DOTALL)
+    if not m:
+        return []
+    out, seen = [], set()
+    for line in m.group(1).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            content = json.loads(line).get("content", "")
+        except json.JSONDecodeError:
+            continue
+        pm = re.search(r"\[src:[^\]]*\|\s*p\.(\d+)", content)
+        if pm and int(pm.group(1)) in pages and content not in seen:
+            seen.add(content)
+            out.append(content[:1200])
     return out
 
 
