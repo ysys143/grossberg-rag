@@ -20,9 +20,14 @@ In-session commands:
 """
 import asyncio
 import json
+import logging
 import re
 import sys
 from pathlib import Path
+
+# Quiet LightRAG/vectordb INFO noise — we surface clean Korean status lines instead.
+for _name in ("lightrag", "nano-vectordb", "nano_vectordb", "httpx", "httpcore"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
 
 from dotenv import load_dotenv
 
@@ -106,6 +111,7 @@ class ChatSession:
                 span.set_attribute("input.value", question)
                 span.set_attribute("metadata.turn", len(self.history) // 2 + 1)
 
+            print(f"{_DIM}· 「{question}」 관련 내용을 검색 중입니다...{_RESET}")
             assembled = await self.rag.aquery(
                 question,
                 param=QueryParam(
@@ -120,6 +126,11 @@ class ChatSession:
                 assembled.split(_MARKER, 1) if _MARKER in assembled else (assembled, question)
             )
             self.last_sources = _extract_sources(sys_prompt)
+            ent, rel, chunk = _count_retrieved(sys_prompt)
+            print(f"{_DIM}· 근거를 찾았습니다 — 엔티티 {ent}개, 관계 {rel}개, 청크 {chunk}개{_RESET}")
+            if fn is not None:
+                print(f"{_DIM}· 관련도 순으로 재정렬({self.rerank_mode})했습니다{_RESET}")
+            print(f"{_DIM}· {self.provider} 모델로 답변을 생성하고 있습니다...{_RESET}\n")
 
             print(f"{_DIM}[Reasoning]{_RESET}")
             answer_parts: list[str] = []
@@ -150,12 +161,26 @@ class ChatSession:
         summary = await _summarize_cited(question, cited) if cited else "(no sources cited)"
         self.history.append({"role": "user", "content": question})
         self.history.append({"role": "assistant", "content": summary})
-        print(f"{_DIM}({len(cited)} cited chunks -> summary carried){_RESET}")
+        print(f"{_DIM}· 인용된 근거 {len(cited)}개를 요약해 대화 기억에 추가했습니다{_RESET}")
 
 
 class _nullctx:
     def __enter__(self): return None
     def __exit__(self, *a): return False
+
+
+def _count_retrieved(sys_prompt: str) -> tuple[int, int, int]:
+    """(entities, relations, chunks) counts from the assembled context blocks."""
+    def _n(label_a: str, label_b: str | None = None) -> int:
+        i = sys_prompt.find(label_a)
+        if i < 0:
+            return 0
+        j = sys_prompt.find(label_b, i) if label_b else len(sys_prompt)
+        return sum(1 for ln in sys_prompt[i:j].splitlines() if ln.strip().startswith("{"))
+    ent = _n("Knowledge Graph Data (Entity)", "Knowledge Graph Data (Relationship)")
+    rel = _n("Knowledge Graph Data (Relationship)", "Document Chunks")
+    chunk = _n("Document Chunks", "Reference Document List")
+    return ent, rel, chunk
 
 
 def _extract_sources(sys_prompt: str) -> list[str]:
