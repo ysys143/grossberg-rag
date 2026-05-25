@@ -305,7 +305,7 @@ def _parse_args() -> tuple[str, str | None, str, Path]:
         i = args.index("--rerank"); rerank_mode = args[i + 1]
     if "--session" in args:
         i = args.index("--session"); session_name = args[i + 1]
-    if "--resume" in args:
+    if any(a in args for a in ("--resume", "--continue", "-c")):
         resume = True
     base = _cfg["storage"]["working_dir"]
     wdir = base + (f"_{pdf_stem}" if pdf_stem else "")
@@ -336,7 +336,7 @@ _HELP = """commands:
   /clear             reset conversation history (saved)
   /exit              quit (or 'exit', Ctrl-D)
 session: auto-saved each turn -> sessions/<name>.json
-  --session NAME  resume/create named · --resume  continue most recent"""
+  --session NAME  resume/create named · --resume|--continue|-c  continue most recent"""
 
 
 async def _handle_command(line: str, sess: ChatSession) -> bool:

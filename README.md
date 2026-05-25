@@ -173,7 +173,7 @@ Grossberg *Conscious Mind, Resonant Brain* 4장(62p)의 멀티모달 RAG. 단일
 
 ### 4.14 **세션 영속화 (chat.py)**
 - 대화 히스토리(append-only 요약)를 **매 턴 자동 저장** → `sessions/<name>.json` (atomic tmp→rename, crash-safe). 종료 시점만이 아니라 턴마다 저장하므로 비정상 종료에도 직전 턴까지 보존 (인덱싱 WAL과 동일 철학).
-- `--session NAME`: 명명 세션 재개/생성 · `--resume`: 가장 최근 세션 이어가기 · 옵션 없으면 타임스탬프 세션 신규.
+- `--session NAME`: 명명 세션 재개/생성 · `--resume` (`--continue`/`-c`): 가장 최근 세션 이어가기 · 옵션 없으면 타임스탬프 세션 신규.
 - `/sessions`로 저장된 세션 목록(현재 `*`), `/clear`는 초기화 후 저장 반영.
 - 히스토리가 요약본이라 세션 파일이 가볍고, 재개해도 캐시 친화적 prefix가 유지됨.
 
