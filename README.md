@@ -171,6 +171,20 @@ Grossberg *Conscious Mind, Resonant Brain* 4장(62p)의 멀티모달 RAG. 단일
 - **append-only가 캐싱을 지킴**: 과거 턴 요약은 생성 후 불변 → 프롬프트 prefix 고정 → provider prompt caching 유지. "과거 압축·현재 상세"라는 rolling 요약의 의도는, 현재 턴의 전체 근거를 항상 fresh retrieval이 제공하므로 손실 없이 달성. (rolling은 과거를 재작성해 prefix를 깨므로 채택하지 않음.)
 - `conversation_history`는 LightRAG `QueryParam(conversation_history, history_turns)`로 전달돼 retrieval·프롬프트 조립이 맥락을 인지 → follow-up의 지시어("그게")가 이전 턴 주제로 해소됨.
 
+### 4.14 **세션 영속화 (chat.py)**
+- 대화 히스토리(append-only 요약)를 **매 턴 자동 저장** → `sessions/<name>.json` (atomic tmp→rename, crash-safe). 종료 시점만이 아니라 턴마다 저장하므로 비정상 종료에도 직전 턴까지 보존 (인덱싱 WAL과 동일 철학).
+- `--session NAME`: 명명 세션 재개/생성 · `--resume`: 가장 최근 세션 이어가기 · 옵션 없으면 타임스탬프 세션 신규.
+- `/sessions`로 저장된 세션 목록(현재 `*`), `/clear`는 초기화 후 저장 반영.
+- 히스토리가 요약본이라 세션 파일이 가볍고, 재개해도 캐시 친화적 prefix가 유지됨.
+
+### 4.15 **종료·인터럽트 처리 (chat.py)**
+- 종료: `/exit`, plain `exit`/`quit`/`q`, Ctrl-D, 프롬프트에서 Ctrl-C.
+- **답변 생성 중 Ctrl-C**: 그 턴만 취소하고 프롬프트로 복귀 (traceback 없음). `__main__`이 stray `KeyboardInterrupt`를 최종 포착해 어느 경로든 clean shutdown.
+- 입력 프롬프트의 ANSI 색상은 `\001..\002`(readline 비출력 마커)로 감싸 백스페이스·방향키·히스토리 라인 편집이 정상 동작.
+
+### 4.16 **한글 상태 메시지 (chat.py)**
+- LightRAG 영문 INFO 로그를 억제하지 않고 `_KoreanStatusHandler`로 가로채 검색 파이프라인 각 단계를 한글로 재방출: 엔티티/관계 키워드 → 지역/전역 검색 수 → 원시 결과 → 토큰 truncation → 청크 병합 → rerank(M→N) → 최종 컨텍스트. storage-init 노이즈는 패턴 미매칭으로 자동 폐기.
+
 ---
 
 ## 5. 설치 및 실행
@@ -206,8 +220,12 @@ uv sync
 # 8. A/B 비교
 .venv/bin/python ab_test.py "질문"
 
-# 9. 인터랙티브
-.venv/bin/python query.py
+# 9. 대화형(멀티턴) 검색 — 세션 영속화, 한글 상태, /명령
+.venv/bin/python chat.py                       # 새 세션 (타임스탬프 저장)
+.venv/bin/python chat.py --session research1   # 명명 세션 재개/생성
+.venv/bin/python chat.py --resume              # 가장 최근 세션 이어가기
+.venv/bin/python chat.py --provider gemini --rerank batched
+#   세션 중 명령: /provider /rerank /sources /history /sessions /clear /exit
 ```
 
 ---
@@ -265,7 +283,6 @@ jq -s '[.[] | select(.usage.promptTokenCount)] | {total_prompt: (map(.usage.prom
 ## 8. 한계와 향후 작업
 
 - **단일 문서 corpus**: 다중 문서 추가 시 reranker의 가치가 크게 올라갈 것으로 예상.
-- **멀티턴 대화 미지원**: 인터랙티브 모드는 각 질의가 독립. OpenAI `previous_response_id`/`conversation_id` 도입 시 follow-up 효율적.
 - **Reranker accuracy**: 더 다양한 어려운 질의 집합으로 통계적 검증 필요.
 - **README가 첫 사용자 친화적이지 않음**: 학습 노트 성격이라 신규 사용자는 별도 quickstart 필요.
 
