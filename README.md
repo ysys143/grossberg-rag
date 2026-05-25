@@ -42,9 +42,11 @@ Grossberg *Conscious Mind, Resonant Brain* 4장(62p)의 멀티모달 RAG. 단일
 | `models.py` | LightRAG가 기대하는 콜백 시그니처에 맞춰 LLM/Vision/Embedding/Answer 함수 조립. provider 라우팅과 style prompt prepending도 여기서 처리 |
 | `rerank.py` | LLM 기반 reranker. `rerank()`(one-shot) / `rerank_batched()`(two-stage) |
 | `prompts/answer_system.md` | 응답 톤·언어·포맷 가이드(교체 가능) |
-| `ingest.py` | 문서 인덱싱 CLI. WAL로 멱등성/충돌 복구 처리 |
+| `ingest.py` | 문서 인덱싱 CLI. WAL로 멱등성/충돌 복구. parse→enrich→insert로 출처 마커 주입 |
 | `query.py` | 인터랙티브 + 단일 질의 모드. `only_need_prompt=True`로 retrieval/answer 분리 |
 | `ab_test.py` | 동일 질문을 `none`/`oneshot`/`batched` 세 모드로 돌리고 비교 |
+| `cite.py` | content_list에 `[src: 문서 \| §섹션 \| p.페이지]` 출처 마커 주입 (page_idx + text_level 활용) |
+| `tracing.py` | Arize AX OpenInference 트레이싱. SDK 없는 HTTP 호출용 manual span (LLM/EMBEDDING/RETRIEVER/RERANKER/CHAIN) |
 
 ---
 
@@ -147,6 +149,19 @@ Grossberg *Conscious Mind, Resonant Brain* 4장(62p)의 멀티모달 RAG. 단일
 ### 4.10 **점진적 스모크 → 풀 인덱싱**
 - 1페이지 → 3페이지 → 62페이지 순서로 비용 누수 없이 검증.
 - `--pdf` 인자로 인덱싱·쿼리 시 별도 storage 디렉터리(`rag_storage_{stem}`) 격리.
+
+### 4.11 **Arize AX 트레이싱 (manual OpenInference span)**
+- `TRACING=1`로 켜면 인덱싱·쿼리 전 구간이 Arize에 trace로 기록됨.
+- SDK 없이 raw HTTP를 쓰므로 auto-instrumentor가 안 잡힘 → `tracing.py`가 로깅 boundary에서 manual span 방출.
+- span tree: `CHAIN(query) → RETRIEVER → {EMBEDDING, RERANKER → LLM} → LLM(answer)`, 인덱싱은 `CHAIN(ingest) → {LLM, EMBEDDING, vision}`.
+- RETRIEVER span에 검색된 entities/relations/chunks + 주입 컨텍스트, answer span에 주입 프롬프트 전체, vision span에 멀티모달 이미지를 OpenInference 규약으로 첨부.
+- **CLI라 flush-before-exit 필수** (비동기 OTLP export가 종료 전 드롭되지 않도록).
+
+### 4.12 **청크 단위 출처 (document · section · page)**
+- MinerU는 `page_idx`(페이지) + `text_level`(헤딩)을 보존하지만 RAGAnything가 청킹 시 버림 → references가 파일명으로 collapse.
+- `cite.py`가 `parse_document`와 `insert_content_list` 사이에서 각 블록에 `[src: 문서 | §섹션 | p.페이지]` 마커를 주입 → 청크가 출처를 보존.
+- 답변 스타일 가이드가 이 마커를 읽어 인라인 인용 + References를 (문서·섹션·페이지) 단위로 생성. 같은 섹션이 여러 페이지면 범위(p.2–3)로 병합.
+- **재인덱싱 필수**: 출처 입도는 청크에 저장된 정보에 종속 — 쿼리 시점에 만들 수 없음.
 
 ---
 

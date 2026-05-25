@@ -36,6 +36,15 @@ _LOG_FULL = os.environ.get("LLM_LOG_FULL", "0") == "1"
 _PREVIEW_CHARS = 300
 
 
+def _provider_of(model: str) -> str:
+    m = (model or "").lower()
+    if m.startswith(("gpt", "o1", "o3", "o4")):
+        return "openai"
+    if m.startswith("gemini"):
+        return "google"
+    return "unknown"
+
+
 def _api_key() -> str:
     key = os.environ.get("GOOGLE_API_KEY", "")
     if not key:
@@ -156,6 +165,7 @@ def _log_call(
     status: str,
     error: str | None = None,
     extra: dict | None = None,
+    images: list | None = None,
 ) -> None:
     """Unified per-call log entry. Captures provider usage stats for cache analysis."""
     entry = {
@@ -175,6 +185,17 @@ def _log_call(
     if extra:
         entry.update(extra)
     _append_log(entry)
+
+    # Emit OpenInference span (no-op if tracing disabled)
+    try:
+        import tracing
+        tracing.emit_llm_span(
+            fn_name=fn_name, model=model, prompt=prompt, response=response_text,
+            usage=usage, elapsed_s=elapsed, status=status,
+            provider=_provider_of(model), images=images,
+        )
+    except Exception:
+        pass
 
 
 def with_logging(fn):
@@ -277,6 +298,7 @@ async def generate_with_vision(
     images: list of data-URIs or local file paths.
     raw_messages: pre-formatted list (OpenAI format) — converted to Gemini contents.
     """
+    img_uris: list[str] = []  # collected for tracing (OpenInference multimodal)
     if raw_messages:
         contents = []
         for msg in raw_messages:
@@ -294,6 +316,7 @@ async def generate_with_vision(
                     elif block.get("type") == "image_url":
                         url = block["image_url"]["url"]
                         if url.startswith("data:"):
+                            img_uris.append(url)
                             header, data = url.split(",", 1)
                             mime = header.split(":")[1].split(";")[0]
                             parts.append({"inline_data": {"mime_type": mime, "data": data}})
@@ -302,16 +325,16 @@ async def generate_with_vision(
         parts = [{"text": prompt}]
         for img in images or []:
             if isinstance(img, str) and img.startswith("data:"):
+                img_uris.append(img)
                 header, data = img.split(",", 1)
                 mime = header.split(":")[1].split(";")[0]
                 parts.append({"inline_data": {"mime_type": mime, "data": data}})
             elif isinstance(img, (str, Path)) and Path(img).exists():
                 raw = Path(img).read_bytes()
+                b64 = base64.b64encode(raw).decode()
+                img_uris.append(f"data:image/png;base64,{b64}")
                 parts.append({
-                    "inline_data": {
-                        "mime_type": "image/png",
-                        "data": base64.b64encode(raw).decode(),
-                    }
+                    "inline_data": {"mime_type": "image/png", "data": b64}
                 })
         contents = [{"role": "user", "parts": parts}]
 
@@ -334,11 +357,11 @@ async def generate_with_vision(
     except Exception as e:
         _log_call("generate_with_vision", model, prompt, None, None,
                   time.monotonic() - t0, "error", f"{type(e).__name__}: {e}",
-                  extra={"images": len(images) if images else 0})
+                  extra={"images": len(img_uris)}, images=img_uris)
         raise
     _log_call("generate_with_vision", model, prompt, text, usage,
               time.monotonic() - t0, "ok",
-              extra={"images": len(images) if images else 0})
+              extra={"images": len(img_uris)}, images=img_uris)
     return text
 
 
@@ -389,7 +412,8 @@ async def _log_stream_summary(fn_name: str, model: str, prompt: str | None,
                               reasoning_buf: list, answer_buf: list,
                               elapsed: float, status: str,
                               usage: dict | None = None,
-                              error: str | None = None) -> None:
+                              error: str | None = None,
+                              system_prompt: str | None = None) -> None:
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "fn": fn_name,
@@ -407,6 +431,21 @@ async def _log_stream_summary(fn_name: str, model: str, prompt: str | None,
     if error:
         entry["error"] = error
     _append_log(entry)
+
+    # Span input = the FULL injected prompt (system context + user query), so the
+    # trace shows "how it was injected", not just the bare question.
+    span_input = (
+        f"{system_prompt}\n\n---User Query---\n\n{prompt}" if system_prompt else prompt
+    )
+    try:
+        import tracing
+        tracing.emit_llm_span(
+            fn_name=fn_name, model=model, prompt=span_input,
+            response="".join(answer_buf), usage=usage, elapsed_s=elapsed,
+            status=status, provider=_provider_of(model),
+        )
+    except Exception:
+        pass
 
 
 async def gemini_generate_stream(
@@ -465,11 +504,12 @@ async def gemini_generate_stream(
         await _log_stream_summary(
             "gemini_generate_stream", model, prompt, reasoning_buf, answer_buf,
             time.monotonic() - t0, "error", usage=usage, error=f"{type(e).__name__}: {e}",
+            system_prompt=system_prompt,
         )
         raise
     await _log_stream_summary(
         "gemini_generate_stream", model, prompt, reasoning_buf, answer_buf,
-        time.monotonic() - t0, "ok", usage=usage,
+        time.monotonic() - t0, "ok", usage=usage, system_prompt=system_prompt,
     )
 
 
@@ -533,9 +573,10 @@ async def openai_generate_stream(
         await _log_stream_summary(
             "openai_generate_stream", model, prompt, reasoning_buf, answer_buf,
             time.monotonic() - t0, "error", usage=usage, error=f"{type(e).__name__}: {e}",
+            system_prompt=system_prompt,
         )
         raise
     await _log_stream_summary(
         "openai_generate_stream", model, prompt, reasoning_buf, answer_buf,
-        time.monotonic() - t0, "ok", usage=usage,
+        time.monotonic() - t0, "ok", usage=usage, system_prompt=system_prompt,
     )

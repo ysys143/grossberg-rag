@@ -20,12 +20,14 @@ def _api_key() -> str:
 
 async def embed_texts(model: str, texts: list[str]) -> list[list[float]]:
     """Batch-embed a list of texts. Returns list of float vectors."""
+    import time
     model_path = model if model.startswith("models/") else f"models/{model}"
     requests = [
         {"model": model_path, "content": {"parts": [{"text": t}]}}
         for t in texts
     ]
 
+    t0 = time.monotonic()
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.post(
             f"{_BASE}/{model_path}:batchEmbedContents",
@@ -33,4 +35,16 @@ async def embed_texts(model: str, texts: list[str]) -> list[list[float]]:
             json={"requests": requests},
         )
         resp.raise_for_status()
-        return [e["values"] for e in resp.json()["embeddings"]]
+        result = [e["values"] for e in resp.json()["embeddings"]]
+
+    try:
+        import tracing
+        tracing.emit_llm_span(
+            fn_name="embed_texts", model=model,
+            prompt=f"{len(texts)} texts", response=f"{len(result)} vectors",
+            usage=None, elapsed_s=time.monotonic() - t0, status="ok",
+            provider="google", kind="EMBEDDING",
+        )
+    except Exception:
+        pass
+    return result

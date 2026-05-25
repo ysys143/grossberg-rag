@@ -52,36 +52,56 @@ async def rerank(
     if not documents:
         return []
 
-    parts = []
-    for i, doc in enumerate(documents):
-        body = doc if len(doc) <= _MAX_DOC_CHARS else doc[:_MAX_DOC_CHARS] + "..."
-        parts.append(f"[{i}] {body}")
-    docs_block = "\n\n".join(parts)
+    import tracing
+    with tracing.span("rerank", "RERANKER", input_value=query) as rspan:
+        if rspan is not None:
+            rspan.set_attribute("reranker.query", query)
+            rspan.set_attribute("reranker.model_name", _RERANK_MODEL)
+            rspan.set_attribute("reranker.top_k", top_n or len(documents))
+            rspan.set_attribute("metadata.input_doc_count", len(documents))
 
-    prompt = _PROMPT_TEMPLATE.format(query=query, docs_block=docs_block)
+        parts = []
+        for i, doc in enumerate(documents):
+            body = doc if len(doc) <= _MAX_DOC_CHARS else doc[:_MAX_DOC_CHARS] + "..."
+            parts.append(f"[{i}] {body}")
+        docs_block = "\n\n".join(parts)
 
-    text = await llm.generate(
-        model=_RERANK_MODEL,
-        prompt=prompt,
-        thinking_budget=0,
-        temperature=0,
-    )
+        prompt = _PROMPT_TEMPLATE.format(query=query, docs_block=docs_block)
 
-    try:
-        scored = json.loads(_strip_fences(text))
-    except json.JSONDecodeError:
-        # Fallback: preserve original order with neutral score
-        return [{"index": i, "relevance_score": 0.5} for i in range(len(documents))]
+        text = await llm.generate(
+            model=_RERANK_MODEL,
+            prompt=prompt,
+            thinking_budget=0,
+            temperature=0,
+        )
 
-    out: list[dict] = []
-    for s in scored:
-        idx = s.get("index")
-        score = s.get("score", 0)
-        if isinstance(idx, int) and 0 <= idx < len(documents):
-            out.append({"index": idx, "relevance_score": float(score) / 100.0})
+        try:
+            scored = json.loads(_strip_fences(text))
+        except json.JSONDecodeError:
+            fallback = [{"index": i, "relevance_score": 0.5} for i in range(len(documents))]
+            if rspan is not None:
+                rspan.set_attribute("metadata.parse_error", True)
+                rspan.set_attribute("metadata.output_doc_count", len(fallback))
+            return fallback
 
-    out.sort(key=lambda x: x["relevance_score"], reverse=True)
-    return out[:top_n] if top_n else out
+        out: list[dict] = []
+        for s in scored:
+            idx = s.get("index")
+            score = s.get("score", 0)
+            if isinstance(idx, int) and 0 <= idx < len(documents):
+                out.append({"index": idx, "relevance_score": float(score) / 100.0})
+
+        out.sort(key=lambda x: x["relevance_score"], reverse=True)
+        result = out[:top_n] if top_n else out
+
+        if rspan is not None:
+            rspan.set_attribute("metadata.output_doc_count", len(result))
+            rspan.set_attribute(
+                "output.value",
+                json.dumps([{"index": r["index"], "score": round(r["relevance_score"], 3)}
+                            for r in result], ensure_ascii=False),
+            )
+        return result
 
 
 async def rerank_batched(

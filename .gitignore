@@ -30,3 +30,7 @@ grossberg_ch4_p3.pdf
 
 # macOS
 .DS_Store
+.arize-tmp-traces/
+
+# Session export artifacts
+2026-*.txt          # conversation export artifacts

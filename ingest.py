@@ -40,6 +40,11 @@ from raganything import RAGAnything
 from raganything.config import RAGAnythingConfig
 
 from models import llm_model_func, vision_model_func, embedding_func
+from cite import enrich_content_list, doc_name_for
+import tracing
+
+tracing.init_tracing("grossberg-rag")
+_tracer = tracing.get_tracer()
 
 _cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
 
@@ -181,12 +186,32 @@ async def ingest(force: bool = False, pdf_override: Path | None = None):
     print("Multimodal parsing in progress (images / tables / equations)...")
 
     t0 = time.monotonic()
-    await rag.process_document_complete(
-        file_path=str(pdf_path),
-        output_dir=str(output_dir),
-        parse_method=p["method"],
-        display_stats=True,
+    # CHAIN span around indexing so vision (multimodal) LLM spans get a parent
+    # and are exported. Each image description call nests under this.
+    import contextlib
+    ingest_cm = (
+        _tracer.start_as_current_span("ingest") if _tracer else contextlib.nullcontext()
     )
+    with ingest_cm as ispan:
+        if ispan is not None:
+            ispan.set_attribute("openinference.span.kind", "CHAIN")
+            ispan.set_attribute("input.value", pdf_path.name)
+            ispan.set_attribute("metadata.sha256", file_hash)
+        # parse → enrich with (document, section, page) source markers → insert.
+        # Splitting parse/insert lets us inject citation metadata into each block
+        # before LightRAG chunks it (process_document_complete would skip this).
+        content_list, doc_id = await rag.parse_document(
+            file_path=str(pdf_path),
+            output_dir=str(output_dir),
+            parse_method=p["method"],
+        )
+        content_list = enrich_content_list(content_list, doc_name_for(pdf_path))
+        await rag.insert_content_list(
+            content_list,
+            file_path=pdf_path.name,
+            doc_id=doc_id,
+            display_stats=True,
+        )
     elapsed = time.monotonic() - t0
 
     _wal_complete(working_dir, file_hash)
@@ -200,4 +225,7 @@ if __name__ == "__main__":
         (sys.argv[i + 1] for i, a in enumerate(sys.argv) if a == "--pdf" and i + 1 < len(sys.argv)),
         None,
     )
-    asyncio.run(ingest(force=force, pdf_override=Path(pdf_arg) if pdf_arg else None))
+    try:
+        asyncio.run(ingest(force=force, pdf_override=Path(pdf_arg) if pdf_arg else None))
+    finally:
+        tracing.shutdown_tracing()  # flush spans before exit (CLI)
