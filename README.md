@@ -43,7 +43,8 @@ Grossberg *Conscious Mind, Resonant Brain* 4장(62p)의 멀티모달 RAG. 단일
 | `rerank.py` | LLM 기반 reranker. `rerank()`(one-shot) / `rerank_batched()`(two-stage) |
 | `prompts/answer_system.md` | 응답 톤·언어·포맷 가이드(교체 가능) |
 | `ingest.py` | 문서 인덱싱 CLI. WAL로 멱등성/충돌 복구. parse→enrich→insert로 출처 마커 주입 |
-| `query.py` | 인터랙티브 + 단일 질의 모드. `only_need_prompt=True`로 retrieval/answer 분리 |
+| `query.py` | 단일 질의 모드. `only_need_prompt=True`로 retrieval/answer 분리 |
+| `chat.py` | 대화형(멀티턴) 검색 CLI. `conversation_history`로 follow-up 맥락 유지 + 런타임 `/provider`·`/rerank`·`/sources` 명령 |
 | `ab_test.py` | 동일 질문을 `none`/`oneshot`/`batched` 세 모드로 돌리고 비교 |
 | `cite.py` | content_list에 `[src: 문서 \| §섹션 \| p.페이지]` 출처 마커 주입 (page_idx + text_level 활용) |
 | `tracing.py` | Arize AX OpenInference 트레이싱. SDK 없는 HTTP 호출용 manual span (LLM/EMBEDDING/RETRIEVER/RERANKER/CHAIN) |
