@@ -156,30 +156,32 @@ def _cited_pages(answer: str) -> set[int]:
 
 
 def _cited_chunks(answer: str, sys_prompt: str) -> list[str]:
-    """Return retrieved chunk contents whose [src: ... p.N] page was cited in the answer.
+    """Return retrieved units (entity/relation/chunk) whose [src: ... p.N] page was
+    cited in the answer.
 
-    Page is the matching key — clean integers vs OCR-noisy section names. Parses the
-    Document Chunks NDJSON block from the assembled prompt.
+    In hybrid/mix mode the Document Chunks block is often empty — retrieval is
+    entity/relation-centric, and the [src:] markers live inside entity/relation
+    DESCRIPTIONS (KG extraction absorbed them from the source text). So we scan
+    every JSON object across all context blocks, not just Document Chunks. Page is
+    the match key (clean integers vs OCR-noisy section names).
     """
     pages = _cited_pages(answer)
     if not pages:
         return []
-    m = re.search(r"Document Chunks.*?```json\n(.*?)\n```", sys_prompt, re.DOTALL)
-    if not m:
-        return []
     out, seen = [], set()
-    for line in m.group(1).splitlines():
+    for line in sys_prompt.splitlines():
         line = line.strip()
-        if not line:
+        if not line.startswith("{"):
             continue
         try:
-            content = json.loads(line).get("content", "")
+            obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        pm = re.search(r"\[src:[^\]]*\|\s*p\.(\d+)", content)
-        if pm and int(pm.group(1)) in pages and content not in seen:
-            seen.add(content)
-            out.append(content[:1200])
+        text = obj.get("content") or obj.get("description") or ""
+        pm = re.search(r"\[src:[^\]]*\|\s*p\.(\d+)", text)
+        if pm and int(pm.group(1)) in pages and text not in seen:
+            seen.add(text)
+            out.append(text[:1000])
     return out
 
 
