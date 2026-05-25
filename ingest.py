@@ -111,22 +111,6 @@ def _wal_complete(working_dir: Path, file_hash: str) -> None:
         _wal_save(working_dir, wal)
 
 
-def _purge_lightrag_doc_status(working_dir: Path, file_hash: str) -> None:
-    """Remove this doc's entry from LightRAG's internal doc_status.
-
-    Targets only the affected doc-id; other documents' indices are preserved.
-    """
-    doc_status_path = working_dir / "kv_store_doc_status.json"
-    if not doc_status_path.exists():
-        return
-
-    data = json.loads(doc_status_path.read_text())
-    doc_id = f"doc-{file_hash}"
-    if doc_id in data:
-        del data[doc_id]
-        doc_status_path.write_text(json.dumps(data, indent=2))
-
-
 def _stage(msg: str) -> None:
     """Flushed, timestamped stage marker so progress is visible in real time even
     when stdout is redirected to a file (block-buffered)."""
@@ -158,13 +142,16 @@ async def ingest(force: bool = False, pdf_override: Path | None = None):
         return
 
     is_recovery = _wal_begin(working_dir, file_hash, pdf_path)
+    # Purge the old copy of this doc before re-inserting, so a reprocess replaces
+    # rather than duplicates. Done AFTER parse (needs the real doc_id) via
+    # LightRAG's adelete_by_doc_id, which cascades across chunks / vectors /
+    # entities / relations — unlike the old doc_status-only purge, which left
+    # stale chunks behind and produced duplicates.
+    needs_purge = is_recovery or (force and status == "completed")
     if is_recovery:
-        print(f"RECOVERY: previous run was interrupted (WAL status=in_progress)")
-        print(f"          purging stale LightRAG doc_status for doc-{file_hash[:12]}...")
-        _purge_lightrag_doc_status(working_dir, file_hash)
+        print("RECOVERY: previous run was interrupted (WAL status=in_progress)")
     elif force and status == "completed":
-        # --force on a completed run: clear stale state to ensure clean reprocess
-        _purge_lightrag_doc_status(working_dir, file_hash)
+        print("FORCE: reprocessing already-indexed doc; old copy will be purged")
 
     config = RAGAnythingConfig(
         working_dir=str(working_dir),
@@ -217,6 +204,17 @@ async def ingest(force: bool = False, pdf_override: Path | None = None):
         )
         _stage(f"PARSE done in {time.monotonic() - t:.1f}s — {len(content_list)} blocks, "
                f"{sum(1 for b in content_list if b.get('type') == 'image')} images")
+
+        if needs_purge:
+            _stage(f"PURGE old doc {doc_id} (cascade: chunks/vectors/entities/relations)")
+            await rag._ensure_lightrag_initialized()
+            try:
+                # delete_llm_cache=True so cached (possibly image-blind) descriptions
+                # are dropped and regenerated, not served stale on reprocess.
+                await rag.lightrag.adelete_by_doc_id(doc_id, delete_llm_cache=True)
+            except Exception as e:
+                print(f"  WARN: adelete_by_doc_id failed ({type(e).__name__}: {e}); "
+                      "old data may persist — use a clean working_dir if duplicates appear")
 
         _stage("ENRICH (inject citation markers)")
         content_list = enrich_content_list(content_list, doc_name_for(pdf_path))
