@@ -32,6 +32,12 @@ query:
   max_injected_images: 5           # cap K for the relevance gate
   image_gate_model: gemini-3.1-flash-lite   # cheap classifier that picks query-relevant images
 
+agent:
+  max_tool_rounds: 4          # safety cap on tool-call iterations per query
+  web_search: true            # include OpenAI built-in web_search_preview tool
+                              # Phase-2 TODO: replace with custom Tavily function
+                              # tool to enable summarisation middleware on raw results
+
 router:
   enabled: true
   model: gemini-3.1-flash-lite     # cheap front-of-pipeline classifier; thinking disabled
