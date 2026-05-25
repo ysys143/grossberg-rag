@@ -35,3 +35,6 @@ grossberg_ch4_p3.pdf
 # Session export artifacts
 # conversation export artifacts
 2026-*.txt
+
+# Conversation sessions
+sessions/

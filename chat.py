@@ -23,6 +23,7 @@ import json
 import logging
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 try:
@@ -61,6 +62,7 @@ _MARKER = "\n\n---User Query---\n\n"
 _RERANK_FUNCS = {"none": None, "oneshot": rerank_oneshot, "batched": rerank_batched}
 _HISTORY_TURNS = 6  # how many prior turns LightRAG folds into retrieval/context
 _SUMMARIZE_MODEL = "gemini-3.1-flash-lite"  # cheap, thinking-off summarizer
+_SESSIONS_DIR = Path(__file__).parent / "sessions"  # persisted conversation history
 
 
 # Re-route LightRAG's English INFO logs to richer Korean status lines. Storage-init
@@ -122,13 +124,37 @@ async def _summarize_cited(question: str, cited: list[str]) -> str:
 
 
 class ChatSession:
-    def __init__(self, working_dir: str, provider: str | None, rerank_mode: str):
+    def __init__(self, working_dir: str, provider: str | None, rerank_mode: str,
+                 session_path: Path):
         self.working_dir = working_dir
         self.provider = provider or ANSWER_PROVIDER_DEFAULT
         self.rerank_mode = rerank_mode
+        self.session_path = session_path
         self.history: list[dict] = []   # [{"role": "user"|"assistant", "content": str}]
         self.last_sources: list[str] = []
         self.rag: LightRAG | None = None
+
+    def load(self) -> int:
+        """Restore history (+ provider/rerank if not CLI-overridden). Returns prior turn count."""
+        if not self.session_path.exists():
+            return 0
+        data = json.loads(self.session_path.read_text())
+        self.history = data.get("history", [])
+        return len(self.history) // 2
+
+    def save(self) -> None:
+        """Atomic write of the session so a crash mid-turn can't corrupt it."""
+        _SESSIONS_DIR.mkdir(exist_ok=True)
+        data = {
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "working_dir": self.working_dir,
+            "provider": self.provider,
+            "rerank_mode": self.rerank_mode,
+            "history": self.history,
+        }
+        tmp = self.session_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+        tmp.replace(self.session_path)
 
     async def setup(self):
         self.rag = LightRAG(
@@ -208,6 +234,7 @@ class ChatSession:
         summary = await _summarize_cited(question, cited) if cited else "(no sources cited)"
         self.history.append({"role": "user", "content": question})
         self.history.append({"role": "assistant", "content": summary})
+        self.save()  # persist after every turn (crash-safe)
         print(f"{_DIM}· 인용된 근거 {len(cited)}개를 요약해 대화 기억에 추가했습니다{_RESET}")
 
 
@@ -266,18 +293,37 @@ def _cited_chunks(answer: str, sys_prompt: str) -> list[str]:
     return out
 
 
-def _parse_args() -> tuple[str, str | None, str]:
+def _parse_args() -> tuple[str, str | None, str, Path]:
     args = sys.argv[1:]
     pdf_stem, provider, rerank_mode = None, None, "oneshot"
+    session_name, resume = None, False
     if "--pdf" in args:
         i = args.index("--pdf"); pdf_stem = Path(args[i + 1]).stem
     if "--provider" in args:
         i = args.index("--provider"); provider = args[i + 1]
     if "--rerank" in args:
         i = args.index("--rerank"); rerank_mode = args[i + 1]
+    if "--session" in args:
+        i = args.index("--session"); session_name = args[i + 1]
+    if "--resume" in args:
+        resume = True
     base = _cfg["storage"]["working_dir"]
     wdir = base + (f"_{pdf_stem}" if pdf_stem else "")
-    return wdir, provider, rerank_mode
+
+    # Resolve which session file to use
+    if session_name:
+        session_path = _SESSIONS_DIR / f"{session_name}.json"
+    elif resume:
+        existing = sorted(_SESSIONS_DIR.glob("*.json"),
+                          key=lambda p: p.stat().st_mtime, reverse=True)
+        session_path = existing[0] if existing else _SESSIONS_DIR / f"{_session_ts()}.json"
+    else:
+        session_path = _SESSIONS_DIR / f"{_session_ts()}.json"
+    return wdir, provider, rerank_mode, session_path
+
+
+def _session_ts() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
 _HELP = """commands:
@@ -286,8 +332,11 @@ _HELP = """commands:
   /rerank <mode>     switch rerank (none | oneshot | batched)
   /sources           sources cited in the last answer
   /history           conversation so far
-  /clear             reset conversation history
-  /exit              quit (or Ctrl-D)"""
+  /sessions          list saved sessions (* = current)
+  /clear             reset conversation history (saved)
+  /exit              quit (or 'exit', Ctrl-D)
+session: auto-saved each turn -> sessions/<name>.json
+  --session NAME  resume/create named · --resume  continue most recent"""
 
 
 async def _handle_command(line: str, sess: ChatSession) -> bool:
@@ -316,38 +365,66 @@ async def _handle_command(line: str, sess: ChatSession) -> bool:
             print(f"  {tag}: {h['content'][:100]}")
     elif cmd == "/clear":
         sess.history.clear()
+        sess.save()
         print(f"{_GREEN}history cleared{_RESET}")
+    elif cmd == "/sessions":
+        files = sorted(_SESSIONS_DIR.glob("*.json"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        if not files:
+            print(f"{_DIM}(no saved sessions){_RESET}")
+        for p in files[:15]:
+            try:
+                d = json.loads(p.read_text())
+                turns = len(d.get("history", [])) // 2
+                mark = " *" if p == sess.session_path else ""
+                print(f"  {p.stem}  ({turns} turns, {d.get('updated_at', '?')}){mark}")
+            except (json.JSONDecodeError, OSError):
+                pass
     else:
         print(f"{_DIM}unknown command -- /help{_RESET}")
     return True
 
 
 async def main():
-    wdir, provider, rerank_mode = _parse_args()
+    wdir, provider, rerank_mode, session_path = _parse_args()
     if not Path(wdir).exists():
         print(f"ERROR: Storage not found -- {wdir}\n       Run ingest.py first.")
         sys.exit(1)
 
-    sess = ChatSession(wdir, provider, rerank_mode)
+    sess = ChatSession(wdir, provider, rerank_mode, session_path)
+    prior = sess.load()
     await sess.setup()
     print(f"{_CYAN}{_BOLD}Grossberg RAG -- conversational search{_RESET}")
-    print(f"{_DIM}storage={wdir} · provider={sess.provider} · rerank={sess.rerank_mode} · /help for commands{_RESET}\n")
+    print(f"{_DIM}storage={wdir} · provider={sess.provider} · rerank={sess.rerank_mode} · session={session_path.stem} · /help{_RESET}")
+    if prior:
+        print(f"{_DIM}· 이전 세션 {prior}개 턴을 이어갑니다{_RESET}")
+    print()
 
     try:
         while True:
             try:
                 line = input(_INPUT_PROMPT).strip()
-            except (EOFError, KeyboardInterrupt):
+            except EOFError:           # Ctrl-D -> exit
+                print("\nbye.")
+                break
+            except KeyboardInterrupt:  # Ctrl-C at the prompt -> exit
                 print("\nbye.")
                 break
             if not line:
                 continue
+            if line.lower() in ("exit", "quit", "q"):
+                print("bye.")
+                break
             if line.startswith("/"):
                 if not await _handle_command(line, sess):
                     print("bye.")
                     break
                 continue
-            await sess.ask(line)
+            try:
+                await sess.ask(line)
+            except KeyboardInterrupt:  # Ctrl-C during streaming -> cancel this turn
+                print(f"\n{_DIM}· 생성을 중단했습니다 (종료: /exit 또는 빈 입력에서 Ctrl-C){_RESET}")
+                continue
             print()
     finally:
         await sess.teardown()
@@ -355,4 +432,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:  # final guard: clean exit, no traceback
+        print("\nbye.")
