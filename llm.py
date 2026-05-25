@@ -286,6 +286,25 @@ async def generate(
     return text
 
 
+def _encode_image(img: str | Path) -> tuple[str, str]:
+    """Return (data_uri, mime_type) from a data-URI string or a local file path.
+
+    File bytes are base64-encoded; mime is inferred from the suffix (our figures
+    are .jpg). Shared by the vision + streaming answer paths.
+    """
+    if isinstance(img, str) and img.startswith("data:"):
+        return img, img.split(":", 1)[1].split(";", 1)[0]
+    raw = Path(img).read_bytes()
+    b64 = base64.b64encode(raw).decode()
+    mime = "image/png" if str(img).lower().endswith(".png") else "image/jpeg"
+    return f"data:{mime};base64,{b64}", mime
+
+
+def _gemini_image_part(data_uri: str, mime: str) -> dict:
+    """data-URI -> Gemini inline_data part."""
+    return {"inline_data": {"mime_type": mime, "data": data_uri.split(",", 1)[1]}}
+
+
 async def generate_with_vision(
     model: str,
     prompt: str,
@@ -324,18 +343,10 @@ async def generate_with_vision(
     else:
         parts = [{"text": prompt}]
         for img in images or []:
-            if isinstance(img, str) and img.startswith("data:"):
-                img_uris.append(img)
-                header, data = img.split(",", 1)
-                mime = header.split(":")[1].split(";")[0]
-                parts.append({"inline_data": {"mime_type": mime, "data": data}})
-            elif isinstance(img, (str, Path)) and Path(img).exists():
-                raw = Path(img).read_bytes()
-                b64 = base64.b64encode(raw).decode()
-                img_uris.append(f"data:image/png;base64,{b64}")
-                parts.append({
-                    "inline_data": {"mime_type": "image/png", "data": b64}
-                })
+            if isinstance(img, str) and img.startswith("data:") or Path(str(img)).exists():
+                data_uri, mime = _encode_image(img)
+                img_uris.append(data_uri)
+                parts.append(_gemini_image_part(data_uri, mime))
         contents = [{"role": "user", "parts": parts}]
 
     body: dict = {"contents": contents}
@@ -413,7 +424,8 @@ async def _log_stream_summary(fn_name: str, model: str, prompt: str | None,
                               elapsed: float, status: str,
                               usage: dict | None = None,
                               error: str | None = None,
-                              system_prompt: str | None = None) -> None:
+                              system_prompt: str | None = None,
+                              images: list | None = None) -> None:
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "fn": fn_name,
@@ -442,7 +454,7 @@ async def _log_stream_summary(fn_name: str, model: str, prompt: str | None,
         tracing.emit_llm_span(
             fn_name=fn_name, model=model, prompt=span_input,
             response="".join(answer_buf), usage=usage, elapsed_s=elapsed,
-            status=status, provider=_provider_of(model),
+            status=status, provider=_provider_of(model), images=images,
         )
     except Exception:
         pass
@@ -454,13 +466,23 @@ async def gemini_generate_stream(
     system_prompt: str | None = None,
     include_thoughts: bool = True,
     thinking_budget: int = -1,
+    images: list | None = None,
 ) -> AsyncIterator[dict]:
     """Stream Gemini response with thought parts (reasoning) + answer parts.
 
+    images: optional list of data-URIs / local file paths injected alongside the
+    text prompt (query-time figure re-injection).
+
     Yields: {"type": "reasoning"|"answer", "delta": str}
     """
+    parts: list = [{"text": prompt}]
+    img_uris: list[str] = []
+    for img in images or []:
+        data_uri, mime = _encode_image(img)
+        img_uris.append(data_uri)
+        parts.append(_gemini_image_part(data_uri, mime))
     body: dict = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "contents": [{"role": "user", "parts": parts}],
         "generationConfig": {
             "thinkingConfig": {
                 "includeThoughts": include_thoughts,
@@ -504,12 +526,13 @@ async def gemini_generate_stream(
         await _log_stream_summary(
             "gemini_generate_stream", model, prompt, reasoning_buf, answer_buf,
             time.monotonic() - t0, "error", usage=usage, error=f"{type(e).__name__}: {e}",
-            system_prompt=system_prompt,
+            system_prompt=system_prompt, images=img_uris,
         )
         raise
     await _log_stream_summary(
         "gemini_generate_stream", model, prompt, reasoning_buf, answer_buf,
         time.monotonic() - t0, "ok", usage=usage, system_prompt=system_prompt,
+        images=img_uris,
     )
 
 
@@ -517,20 +540,40 @@ async def openai_generate_stream(
     model: str,
     prompt: str,
     system_prompt: str | None = None,
+    effort: str | None = None,
+    images: list | None = None,
 ) -> AsyncIterator[dict]:
     """Stream OpenAI Responses API with reasoning summary + final output.
+
+    effort: None -> model default; "low"|"medium"|"high" sets reasoning.effort,
+    letting the router dial reasoning depth per question.
+    images: optional list of data-URIs / local file paths injected as input_image
+    blocks on the user turn (query-time figure re-injection).
 
     Yields: {"type": "reasoning"|"answer", "delta": str}
     """
     input_messages: list = []
     if system_prompt:
         input_messages.append({"role": "system", "content": system_prompt})
-    input_messages.append({"role": "user", "content": prompt})
 
+    img_uris: list[str] = []
+    if images:
+        user_content: list = [{"type": "input_text", "text": prompt}]
+        for img in images:
+            data_uri, _ = _encode_image(img)
+            img_uris.append(data_uri)
+            user_content.append({"type": "input_image", "image_url": data_uri})
+        input_messages.append({"role": "user", "content": user_content})
+    else:
+        input_messages.append({"role": "user", "content": prompt})
+
+    reasoning_cfg: dict = {"summary": "auto"}
+    if effort:
+        reasoning_cfg["effort"] = effort
     body = {
         "model": model,
         "input": input_messages,
-        "reasoning": {"summary": "auto"},
+        "reasoning": reasoning_cfg,
         "stream": True,
     }
 
@@ -573,10 +616,11 @@ async def openai_generate_stream(
         await _log_stream_summary(
             "openai_generate_stream", model, prompt, reasoning_buf, answer_buf,
             time.monotonic() - t0, "error", usage=usage, error=f"{type(e).__name__}: {e}",
-            system_prompt=system_prompt,
+            system_prompt=system_prompt, images=img_uris,
         )
         raise
     await _log_stream_summary(
         "openai_generate_stream", model, prompt, reasoning_buf, answer_buf,
         time.monotonic() - t0, "ok", usage=usage, system_prompt=system_prompt,
+        images=img_uris,
     )

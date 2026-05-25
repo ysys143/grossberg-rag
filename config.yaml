@@ -16,6 +16,7 @@ models:
     openai: gpt-5.5                  # OpenAI Responses API + reasoning summary streaming
     gemini: gemini-3.1-pro-preview   # Gemini streamGenerateContent + thought parts streaming
     system_prompt: prompts/answer_system.md   # style guide prepended to LightRAG sys_prompt
+    vision_models: [gpt-5.5, gemini-3.1-pro-preview]  # answer models that accept image input
 
 parser:
   engine: mineru
@@ -26,3 +27,16 @@ parser:
 
 query:
   default_mode: hybrid
+  inject_images: true              # re-inject relevant figure pixels into the answer model at query time
+  max_injected_images: 5           # cap K for the relevance gate
+  image_gate_model: gemini-3.1-flash-lite   # cheap classifier that picks query-relevant images
+
+router:
+  enabled: true
+  model: gemini-3.1-flash-lite     # cheap front-of-pipeline classifier; thinking disabled
+  # The router emits an abstract effort level; each provider realizes it differently.
+  # OpenAI uses the string via reasoning.effort. Gemini maps it to a thinking_budget:
+  thinking_budget:
+    low: 512
+    medium: 4096
+    high: -1                       # -1 = dynamic (model decides)

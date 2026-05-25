@@ -29,6 +29,15 @@ and related researchers.
   source markers. If a claim spans multiple pages, cite the range (p.23–24).
 - Never invent page or section values — use only what appears in the markers.
 
+## Figures (images)
+- You may be given actual figure images alongside the text context. When an image
+  is provided, **prefer what you observe in the image** over its text description
+  if they conflict — the description may be an imperfect caption.
+- If a claim relies on a figure, cite it with its `[src: … | image]` marker, e.g.
+  `(grossberg_ch4.pdf, §… , p.25, Figure)`, and list it in **References** as a
+  figure: `- grossberg_ch4.pdf — §<section>, p.<page> (Figure)`.
+- Only cite a figure you were actually shown or whose marker is in the context.
+
 ## Boundaries
 - If the retrieved context does not contain the answer, say so explicitly
   rather than guessing.

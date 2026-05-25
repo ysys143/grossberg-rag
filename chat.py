@@ -19,6 +19,7 @@ In-session commands:
   /exit (or Ctrl-D)     quit
 """
 import asyncio
+import glob
 import json
 import logging
 import re
@@ -39,9 +40,14 @@ load_dotenv(Path.home() / ".oh-my-zsh/custom/apikey.env", override=False)
 import yaml
 from lightrag import LightRAG, QueryParam
 
-from models import llm_model_func, embedding_func, answer_model_stream, ANSWER_PROVIDER_DEFAULT
+from models import (
+    llm_model_func, embedding_func, answer_model_stream,
+    ANSWER_PROVIDER_DEFAULT, is_vision_capable,
+)
 from rerank import rerank as rerank_oneshot, rerank_batched
+import image_gate
 import llm
+import router
 import tracing
 
 # Pure-noise loggers stay silenced; the lightrag logger is re-routed to a Korean
@@ -63,6 +69,7 @@ _RERANK_FUNCS = {"none": None, "oneshot": rerank_oneshot, "batched": rerank_batc
 _HISTORY_TURNS = 6  # how many prior turns LightRAG folds into retrieval/context
 _SUMMARIZE_MODEL = "gemini-3.1-flash-lite"  # cheap, thinking-off summarizer
 _SESSIONS_DIR = Path(__file__).parent / "sessions"  # persisted conversation history
+_INJECT_IMAGES = bool(_cfg["query"].get("inject_images", False))  # query-time figure re-injection
 
 
 # Re-route LightRAG's English INFO logs to richer Korean status lines. Storage-init
@@ -132,7 +139,9 @@ class ChatSession:
         self.session_path = session_path
         self.history: list[dict] = []   # [{"role": "user"|"assistant", "content": str}]
         self.last_sources: list[str] = []
+        self.last_image_sources: list[str] = []   # [src:...|image] markers injected as pixels last turn
         self.rag: LightRAG | None = None
+        self.pending_question: str | None = None  # original Q awaiting HITL clarification
 
     def load(self) -> int:
         """Restore history (+ provider/rerank if not CLI-overridden). Returns prior turn count."""
@@ -173,9 +182,58 @@ class ChatSession:
         self.rerank_mode = mode
         self.rag.rerank_model_func = _RERANK_FUNCS[mode]  # live swap, no rebuild
 
-    async def ask(self, question: str):
+    async def _select_images(self, question: str, sys_prompt: str) -> list[str] | None:
+        """Relevance-gate the retrieved figures and return file paths to inject as
+        pixels, or None. Records the chosen [src:...|image] markers for citation."""
+        self.last_image_sources = []
+        if not _INJECT_IMAGES:
+            return None
+        cands = _image_candidates(sys_prompt)
+        if not cands:
+            return None
+        if not is_vision_capable(self.provider):
+            print(f"{_DIM}· [경고] inject_images=true이지만 현재 답변 모델({self.provider})이 "
+                  f"이미지 입력을 지원하지 않아 텍스트로만 답변합니다{_RESET}")
+            return None
+        print(f"{_DIM}· 관련 이미지를 선별하고 있습니다 (후보 {len(cands)}개)...{_RESET}")
+        selected = await image_gate.select_relevant_images(question, cands)
+        if not selected:
+            print(f"{_DIM}·   직접 관련된 이미지가 없어 주입하지 않습니다{_RESET}")
+            return None
+        by_hash = {c["hash"]: c for c in cands}
+        chosen = [by_hash[h] for h in selected if h in by_hash]
+        self.last_image_sources = [c["marker"] for c in chosen if c["marker"]]
+        print(f"{_DIM}·   이미지 {len(chosen)}개를 답변 컨텍스트에 주입합니다{_RESET}")
+        return [c["path"] for c in chosen]
+
+    async def ask(self, question: str, skip_clarify: bool = False):
         mode = _cfg["query"]["default_mode"]
         fn = _RERANK_FUNCS[self.rerank_mode]
+
+        # Router runs first: decide scope, whether to retrieve, and reasoning effort.
+        print(f"{_DIM}· 질문 유형을 분석하고 있습니다...{_RESET}")
+        decision = await router.route(question, self.history)
+        if not decision["in_scope"]:
+            msg = ("이 질문은 문서(Grossberg 시각 지각 신경 모델) 범위를 벗어납니다. "
+                   "문서 내용에 대해 질문해 주세요.")
+            print(f"\n{msg}\n")
+            self.history.append({"role": "user", "content": question})
+            self.history.append({"role": "assistant", "content": "(범위 밖 질문 — 거절)"})
+            self.save()
+            return
+
+        # HITL clarification gate: if the question is too vague to retrieve well,
+        # pause and ask the user instead of searching. skip_clarify forces past the
+        # gate once the user has already answered (one-round cap -> no loops).
+        if decision["needs_clarification"] and not skip_clarify:
+            self.pending_question = question
+            print(f"\n{_BOLD}· 질문을 좀 더 구체화해 주세요:{_RESET}")
+            print(f"  {decision['clarification']}\n")
+            return  # not recorded in history; resumes when the user replies
+
+        effort = decision["effort"]
+        need = decision["needs_retrieval"]
+        print(f"{_DIM}·   판단: 검색 {'필요' if need else '불필요'} · 추론 강도 {effort}{_RESET}")
 
         chain_cm = (
             _tracer.start_as_current_span("chat_turn") if _tracer else _nullctx()
@@ -185,31 +243,51 @@ class ChatSession:
                 span.set_attribute("openinference.span.kind", "CHAIN")
                 span.set_attribute("input.value", question)
                 span.set_attribute("metadata.turn", len(self.history) // 2 + 1)
+                span.set_attribute("metadata.router.needs_retrieval", need)
+                span.set_attribute("metadata.router.effort", effort)
 
-            print(f"{_DIM}· 「{question}」 관련 내용을 검색 중입니다...{_RESET}")
-            assembled = await self.rag.aquery(
-                question,
-                param=QueryParam(
-                    mode=mode,
-                    only_need_prompt=True,
-                    enable_rerank=(fn is not None),
-                    conversation_history=self.history[-_HISTORY_TURNS * 2:],
-                    history_turns=_HISTORY_TURNS,
-                ),
-            )
-            sys_prompt, user_query = (
-                assembled.split(_MARKER, 1) if _MARKER in assembled else (assembled, question)
-            )
+            if need:
+                print(f"{_DIM}· 「{question}」 관련 내용을 검색 중입니다...{_RESET}")
+                assembled = await self.rag.aquery(
+                    question,
+                    param=QueryParam(
+                        mode=mode,
+                        only_need_prompt=True,
+                        enable_rerank=(fn is not None),
+                        conversation_history=self.history[-_HISTORY_TURNS * 2:],
+                        history_turns=_HISTORY_TURNS,
+                    ),
+                )
+                sys_prompt, user_query = (
+                    assembled.split(_MARKER, 1) if _MARKER in assembled else (assembled, question)
+                )
+            else:
+                # No retrieval: hand the answer model only the conversation so far
+                # (handles greetings, thanks, and meta-questions like "정리해줘").
+                hist = self.history[-_HISTORY_TURNS * 2:]
+                sys_prompt = ("이전 대화:\n" + "\n".join(
+                    f"{h['role']}: {h['content']}" for h in hist)) if hist else ""
+                user_query = question
+
             self.last_sources = _extract_sources(sys_prompt)
             # (detailed retrieval/rerank stages are surfaced in Korean by the
             #  _KoreanStatusHandler that intercepts LightRAG's logs above)
-            print(f"{_DIM}· {self.provider} 모델로 답변을 생성하고 있습니다...{_RESET}\n")
+
+            # Query-time figure re-injection: pick only figures DIRECTLY relevant to
+            # this question and feed their pixels to the (multimodal) answer model, so
+            # it can override a wrong text caption with what it actually observes.
+            images = await self._select_images(question, sys_prompt) if need else None
+            if span is not None:
+                span.set_attribute("metadata.injected_images", len(images or []))
+
+            print(f"{_DIM}· {self.provider} 모델로 답변을 생성하고 있습니다 (강도 {effort})...{_RESET}\n")
 
             print(f"{_DIM}[Reasoning]{_RESET}")
             answer_parts: list[str] = []
             current = "reasoning"
             async for chunk in answer_model_stream(
-                prompt=user_query, system_prompt=sys_prompt, provider=self.provider
+                prompt=user_query, system_prompt=sys_prompt,
+                provider=self.provider, effort=effort, images=images,
             ):
                 if chunk["type"] != current:
                     print(f"\n{_BOLD}[Answer]{_RESET}" if chunk["type"] == "answer"
@@ -230,12 +308,16 @@ class ChatSession:
         # frozen so the prompt prefix is stable -> provider prompt caching keeps
         # working. The current turn's full evidence always comes from fresh
         # retrieval, so summarizing the past loses no answer fidelity.
-        cited = _cited_chunks(answer, sys_prompt)
-        summary = await _summarize_cited(question, cited) if cited else "(no sources cited)"
+        if need:
+            cited = _cited_chunks(answer, sys_prompt)
+            summary = await _summarize_cited(question, cited) if cited else "(no sources cited)"
+            print(f"{_DIM}· 인용된 근거 {len(cited)}개를 요약해 대화 기억에 추가했습니다{_RESET}")
+        else:
+            # No retrieval -> no cited chunks; keep a short gist of the reply.
+            summary = answer[:300]
         self.history.append({"role": "user", "content": question})
         self.history.append({"role": "assistant", "content": summary})
         self.save()  # persist after every turn (crash-safe)
-        print(f"{_DIM}· 인용된 근거 {len(cited)}개를 요약해 대화 기억에 추가했습니다{_RESET}")
 
 
 class _nullctx:
@@ -250,6 +332,53 @@ def _extract_sources(sys_prompt: str) -> list[str]:
         if m not in seen:
             seen.add(m)
             out.append(m)
+    return out
+
+
+def _resolve_image_path(img_hash: str, content: str) -> str | None:
+    """Recover the original figure file: prefer the absolute path embedded in the
+    chunk ("Image Path: /.../<hash>.jpg"); else glob the output images dir by hash."""
+    m = re.search(r"(/\S+?/images/" + re.escape(img_hash) + r"\.\w+)", content)
+    if m and Path(m.group(1)).exists():
+        return m.group(1)
+    hits = glob.glob(f"output*/**/images/{img_hash}.*", recursive=True)
+    return hits[0] if hits else None
+
+
+def _image_candidates(sys_prompt: str) -> list[dict]:
+    """Distinct figure chunks in the assembled context, as gate candidates:
+    {hash, caption, section, page, marker, path}. Drops any whose file can't be found."""
+    out, seen = [], set()
+    for line in sys_prompt.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        content = obj.get("content") or obj.get("description") or ""
+        if "Image Path" not in content:
+            continue
+        hm = re.search(r"images/([a-f0-9]+)", content)
+        if not hm or hm.group(1) in seen:
+            continue
+        img_hash = hm.group(1)
+        path = _resolve_image_path(img_hash, content)
+        if not path:
+            continue
+        seen.add(img_hash)
+        marker_m = re.search(r"\[src:[^\]]*image\]", content)
+        marker = marker_m.group(0) if marker_m else ""
+        sec_m = re.search(r"§(.+?)\s*\|\s*p\.(\d+)", marker or content)
+        out.append({
+            "hash": img_hash,
+            "caption": content[:600],
+            "section": sec_m.group(1).strip() if sec_m else "?",
+            "page": int(sec_m.group(2)) if sec_m else 0,
+            "marker": marker,
+            "path": path,
+        })
     return out
 
 
@@ -363,8 +492,10 @@ async def _handle_command(line: str, sess: ChatSession) -> bool:
         print(f"{_GREEN}rerank -> {parts[1]}{_RESET}")
     elif cmd == "/sources":
         if sess.last_sources:
+            injected = set(sess.last_image_sources)
             for s in sess.last_sources:
-                print(f"  {s}")
+                tag = f"  {_GREEN}[이미지 주입됨]{_RESET}" if s in injected else ""
+                print(f"  {s}{tag}")
         else:
             print(f"{_DIM}(no sources yet){_RESET}")
     elif cmd == "/history":
@@ -373,6 +504,7 @@ async def _handle_command(line: str, sess: ChatSession) -> bool:
             print(f"  {tag}: {h['content'][:100]}")
     elif cmd == "/clear":
         sess.history.clear()
+        sess.pending_question = None
         sess.save()
         print(f"{_GREEN}history cleared{_RESET}")
     elif cmd == "/sessions":
@@ -429,7 +561,14 @@ async def main():
                     break
                 continue
             try:
-                await sess.ask(line)
+                if sess.pending_question is not None:
+                    # This line answers a prior clarification request: merge it with
+                    # the original question and force past the gate (skip_clarify).
+                    merged = f"{sess.pending_question}\n\n[사용자 보충 설명] {line}"
+                    sess.pending_question = None
+                    await sess.ask(merged, skip_clarify=True)
+                else:
+                    await sess.ask(line)
             except KeyboardInterrupt:  # Ctrl-C during streaming -> cancel this turn
                 print(f"\n{_DIM}· 생성을 중단했습니다 (종료: /exit 또는 빈 입력에서 Ctrl-C){_RESET}")
                 continue
