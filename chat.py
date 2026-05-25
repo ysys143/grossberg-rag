@@ -25,6 +25,11 @@ import re
 import sys
 from pathlib import Path
 
+try:
+    import readline  # noqa: F401 — enables backspace/arrow-key/history line editing in input()
+except ImportError:
+    pass
+
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -49,6 +54,9 @@ _tracer = tracing.get_tracer()
 _cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
 
 _DIM, _BOLD, _CYAN, _GREEN, _RESET = "\033[2m", "\033[1m", "\033[36m", "\033[32m", "\033[0m"
+# readline-safe input prompt: wrap non-printing ANSI in \001..\002 so backspace /
+# arrow keys / cursor position aren't thrown off by counting invisible bytes.
+_INPUT_PROMPT = "\001\033[36m\002you >\001\033[0m\002 "
 _MARKER = "\n\n---User Query---\n\n"
 _RERANK_FUNCS = {"none": None, "oneshot": rerank_oneshot, "batched": rerank_batched}
 _HISTORY_TURNS = 6  # how many prior turns LightRAG folds into retrieval/context
@@ -304,7 +312,7 @@ async def main():
     try:
         while True:
             try:
-                line = input(f"{_CYAN}you >{_RESET} ").strip()
+                line = input(_INPUT_PROMPT).strip()
             except (EOFError, KeyboardInterrupt):
                 print("\nbye.")
                 break
