@@ -23,8 +23,7 @@ from typing import Literal
 import yaml
 from lightrag import LightRAG, QueryParam
 
-from .models import llm_model_func, embedding_func
-from .rerank import rerank as rerank_oneshot
+from . import retrieval
 from .paths import CONFIG_PATH
 
 _cfg = yaml.safe_load(CONFIG_PATH.read_text())
@@ -109,14 +108,10 @@ class KBTool:
         self._rag: LightRAG | None = None
 
     async def _get_rag(self) -> LightRAG:
+        # Shared factory -> KBTool (agent loop + grossberg-ask skill) inherits the same
+        # construction-time enhancements (rerank, hybrid_seed) as the chat engine.
         if self._rag is None:
-            self._rag = LightRAG(
-                working_dir=self._wdir,
-                llm_model_func=llm_model_func,
-                embedding_func=embedding_func,
-                rerank_model_func=rerank_oneshot,
-            )
-            await self._rag.initialize_storages()
+            self._rag = await retrieval.build_rag(self._wdir, rerank_mode="oneshot")
         return self._rag
 
     async def search(

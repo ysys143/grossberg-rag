@@ -18,8 +18,8 @@ def mock_rag():
 
 @pytest.fixture
 def patched_tool(monkeypatch, mock_rag):
-    """KBTool with LightRAG constructor patched out."""
-    monkeypatch.setattr(kb_tool, "LightRAG", lambda **kw: mock_rag)
+    """KBTool with the shared rag factory (retrieval.build_rag) patched out."""
+    monkeypatch.setattr(kb_tool.retrieval, "build_rag", AsyncMock(return_value=mock_rag))
     return KBTool("/fake/working/dir"), mock_rag
 
 
@@ -39,31 +39,31 @@ class TestKBToolInit:
 
 
 class TestKBToolGetRag:
-    async def test_first_call_creates_and_initializes(self, monkeypatch, mock_rag):
-        monkeypatch.setattr(kb_tool, "LightRAG", lambda **kw: mock_rag)
+    # NOTE: LightRAG construction + initialize_storages + hybrid_seed are now the shared
+    # factory's job (tested in test_retrieval.py). KBTool only delegates to it and caches.
+    async def test_first_call_builds_rag(self, monkeypatch, mock_rag):
+        build = AsyncMock(return_value=mock_rag)
+        monkeypatch.setattr(kb_tool.retrieval, "build_rag", build)
         tool = KBTool("/fake/dir")
         rag = await tool._get_rag()
         assert rag is mock_rag
-        mock_rag.initialize_storages.assert_called_once()
+        build.assert_called_once()
 
     async def test_second_call_reuses_same_instance(self, monkeypatch, mock_rag):
-        monkeypatch.setattr(kb_tool, "LightRAG", lambda **kw: mock_rag)
+        build = AsyncMock(return_value=mock_rag)
+        monkeypatch.setattr(kb_tool.retrieval, "build_rag", build)
         tool = KBTool("/fake/dir")
         rag1 = await tool._get_rag()
         rag2 = await tool._get_rag()
         assert rag1 is rag2
-        # initialize_storages only called once despite two _get_rag calls
-        mock_rag.initialize_storages.assert_called_once()
+        build.assert_called_once()  # built once despite two _get_rag calls
 
-    async def test_lightrag_constructed_with_working_dir(self, monkeypatch, mock_rag):
-        received_kwargs = {}
-        def capture_ctor(**kw):
-            received_kwargs.update(kw)
-            return mock_rag
-        monkeypatch.setattr(kb_tool, "LightRAG", capture_ctor)
+    async def test_build_rag_called_with_working_dir(self, monkeypatch, mock_rag):
+        build = AsyncMock(return_value=mock_rag)
+        monkeypatch.setattr(kb_tool.retrieval, "build_rag", build)
         tool = KBTool("/my/working/dir")
         await tool._get_rag()
-        assert received_kwargs["working_dir"] == "/my/working/dir"
+        assert build.call_args[0][0] == "/my/working/dir"
 
 
 class TestKBToolSearch:
@@ -190,21 +190,21 @@ class TestKBToolClose:
         await tool.close()  # should not raise
 
     async def test_close_calls_finalize_storages(self, monkeypatch, mock_rag):
-        monkeypatch.setattr(kb_tool, "LightRAG", lambda **kw: mock_rag)
+        monkeypatch.setattr(kb_tool.retrieval, "build_rag", AsyncMock(return_value=mock_rag))
         tool = KBTool("/fake")
-        await tool._get_rag()          # triggers LightRAG creation
+        await tool._get_rag()          # triggers rag construction
         await tool.close()
         mock_rag.finalize_storages.assert_called_once()
 
     async def test_close_sets_rag_to_none(self, monkeypatch, mock_rag):
-        monkeypatch.setattr(kb_tool, "LightRAG", lambda **kw: mock_rag)
+        monkeypatch.setattr(kb_tool.retrieval, "build_rag", AsyncMock(return_value=mock_rag))
         tool = KBTool("/fake")
         await tool._get_rag()
         await tool.close()
         assert tool._rag is None
 
     async def test_double_close_is_safe(self, monkeypatch, mock_rag):
-        monkeypatch.setattr(kb_tool, "LightRAG", lambda **kw: mock_rag)
+        monkeypatch.setattr(kb_tool.retrieval, "build_rag", AsyncMock(return_value=mock_rag))
         tool = KBTool("/fake")
         await tool._get_rag()
         await tool.close()

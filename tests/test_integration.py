@@ -350,9 +350,10 @@ class TestHybridSeedConfigGate:
             await sess.teardown()
 
     async def test_flag_on_attaches_via_setup(self, monkeypatch):
-        from grag import engine
+        from grag import retrieval
         from grag.engine import ChatSession, _SESSIONS_DIR
-        monkeypatch.setitem(engine._cfg["query"], "hybrid_seed", True)
+        # the flag is read by the shared factory (retrieval), not engine
+        monkeypatch.setitem(retrieval._cfg["query"], "hybrid_seed", True)
         sess = ChatSession(_WDIR, provider="gemini", rerank_mode="none",
                            session_path=_SESSIONS_DIR / "_it_on.json")
         await sess.setup()
@@ -458,3 +459,21 @@ class TestGlossaryRealCorpus:
         assert any(t == "BCS" or "Boundary Contour System" in t for t in terms)
         assert any("Filling-In" in t for t in terms)
         assert len(_system_prompt("en", "\n".join(terms))) >= 4000  # Gemini cache threshold
+
+
+@pytest.mark.integration
+@_needs_index
+class TestKBToolInheritsHybridSeed:
+    """The grossberg-ask skill / agent loop build their rag via the shared factory, so
+    enabling hybrid_seed must reach KBTool too (no API; builds from the on-disk index)."""
+
+    async def test_kbtool_rag_is_hybrid_wrapped_when_flag_on(self, monkeypatch):
+        from grag import retrieval
+        from grag.kb_tool import KBTool
+        monkeypatch.setitem(retrieval._cfg["query"], "hybrid_seed", True)
+        kb = KBTool(working_dir=_WDIR)
+        rag = await kb._get_rag()
+        try:
+            assert getattr(rag.entities_vdb, "_grag_hybrid_attached", False) is True
+        finally:
+            await rag.finalize_storages()

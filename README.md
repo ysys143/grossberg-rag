@@ -129,6 +129,7 @@ config.yaml      모델·경로·파서 설정의 단일 출처
 | `grag/agent.py` | Responses API tool-calling 루프 + 통합 스트리밍 |
 | `grag/kb_tool.py` | LightRAG KB를 OpenAI function tool로 노출 |
 | `grag/router.py` | 질의 전 분류기(flash-lite). scope / effort / clarification |
+| `grag/retrieval.py` | retrieval-ready LightRAG 생성 **단일 출처**(`build_rag`). rerank·hybrid_seed enhancement를 한 곳에서 적용 → engine·kb_tool 경로가 어긋나지 않음 |
 | `grag/hybrid_seed.py` | BM25 lexical 엔티티 시드를 LightRAG 벡터 시드에 union (mecab-ko + 자체 Okapi BM25) |
 | `grag/expand.py` | 코퍼스 언어 키워드 확장 + 특이 jargon glossary 자동 추출 (prefix-cache 친화) |
 | `grag/image_gate.py` | 쿼리 시점 이미지 관련성 게이트(flash-lite). fail-closed |

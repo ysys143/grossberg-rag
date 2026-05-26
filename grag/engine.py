@@ -30,21 +30,18 @@ from typing import AsyncIterator
 import yaml
 from lightrag import LightRAG, QueryParam
 
-from .models import (
-    llm_model_func, embedding_func, answer_model_stream,
-    ANSWER_PROVIDER_DEFAULT, is_vision_capable,
-)
-from .rerank import rerank as rerank_oneshot, rerank_batched
+from .models import answer_model_stream, ANSWER_PROVIDER_DEFAULT, is_vision_capable
 from . import image_gate
 from . import llm
 from . import router
 from . import expand
+from . import retrieval
 from . import tracing
 from .paths import CONFIG_PATH, SESSIONS_DIR, DATA_DIR
 
 _cfg = yaml.safe_load(CONFIG_PATH.read_text())
 _MARKER = "\n\n---User Query---\n\n"
-_RERANK_FUNCS = {"none": None, "oneshot": rerank_oneshot, "batched": rerank_batched}
+_RERANK_FUNCS = retrieval.RERANK_FUNCS  # rerank mode -> func (shared with kb_tool via retrieval)
 _HISTORY_TURNS = 6  # how many prior turns LightRAG folds into retrieval/context
 _SUMMARIZE_MODEL = "gemini-3.1-flash-lite"  # cheap, thinking-off summarizer
 _SESSIONS_DIR = SESSIONS_DIR  # persisted conversation history
@@ -281,23 +278,8 @@ class ChatSession:
         tmp.replace(self.session_path)
 
     async def setup(self):
-        self.rag = LightRAG(
-            working_dir=self.working_dir,
-            llm_model_func=llm_model_func,
-            embedding_func=embedding_func,
-            rerank_model_func=_RERANK_FUNCS[self.rerank_mode],
-        )
-        await self.rag.initialize_storages()
-        if _cfg["query"].get("hybrid_seed"):
-            try:
-                from . import hybrid_seed
-                hybrid_seed.attach_hybrid_seed(
-                    self.rag, self.working_dir,
-                    top_k=int(_cfg["query"].get("hybrid_seed_top_k", 10)),
-                )
-            except Exception as e:  # fail-open: an enhancement, never block startup
-                logging.getLogger("grag.hybrid_seed").warning(
-                    f"hybrid_seed disabled (init failed): {type(e).__name__}: {e}")
+        # Shared factory applies construction-time enhancements (rerank, hybrid_seed).
+        self.rag = await retrieval.build_rag(self.working_dir, self.rerank_mode)
         if _cfg["query"].get("expand_keywords"):
             cl = _cfg["query"].get("expand_lang", "auto")
             self.corpus_lang = expand.detect_corpus_lang(self.working_dir) if cl == "auto" else cl

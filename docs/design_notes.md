@@ -267,6 +267,12 @@ Grossberg *Conscious Mind, Resonant Brain* 4장(62p)의 멀티모달 RAG. 단일
 - **검증(A/B)**: 한국어 질의에서 off는 `end-stopped cells`처럼 빗나가고 소문자 변형, on은 `End Cut`·`Filling-In`·`Hypercomplex Cells` 등 **인덱스 정규 표기로 스냅**. 다만 LightRAG 내부 추출기가 이미 일부 영어를 뱉어 이득은 "정밀화"에 가까움.
 - **안전장치**: `query.expand_keywords` 기본 off + 모든 단계 fail-open(확장 실패→내부 추출, glossary 실패→빈 glossary).
 
+### 4.25 **공유 rag 팩토리 — construction-time enhancement 단일 출처 (retrieval.py)**
+- **문제(드리프트)**: retrieval-ready LightRAG를 만드는 경로가 두 곳(`engine.ChatSession.setup`, `kb_tool.KBTool._get_rag`)에 중복돼 있었다. 그래서 hybrid_seed를 engine에만 붙였더니 **KBTool 경로(에이전트 루프 + grossberg-ask 스킬)에는 반영되지 않는** 드리프트가 발생.
+- **해결**: `retrieval.build_rag(working_dir, rerank_mode)` 단일 함수가 LightRAG 생성 + `initialize_storages()` + 모든 config-gated construction-time enhancement(rerank 배선, hybrid_seed attach, 향후 추가분)를 적용한다. engine·kb_tool 둘 다 이 팩토리만 호출 → 새 construction-time 기능은 **한 곳에 넣으면 모든 소비자가 자동 상속**.
+- **경계**: query-time(질의별) 동작인 keyword expansion/glossary는 질의 오케스트레이션(`ask_events`)에 남는다 — 팩토리는 "rag를 어떻게 짓는가"의 단일 출처이지 "질의를 어떻게 처리하는가"는 아니다.
+- **원리**: 엔진 추출(로직=엔진, 표현=소비자)과 동일한 "단일 출처 + 얇은 소비자" 패턴을 rag 생성 계층에 적용한 것.
+
 ---
 
 ## 5. 설치 및 실행
