@@ -2,7 +2,7 @@
 
 ## 모델 계보
 
-Chapter 4의 모델들은 병렬 관계가 아니라 **점진적 확장(embedding)** 관계로 이어진다.
+Chapter 4의 모델들은 병렬 관계가 아니라 점진적 확장(embedding) 관계로 이어진다.
 Grossberg는 이를 "Embedding Principle"이라 부른다: 선행 모델이 후속 모델 안에 완전히 포함된다.
 
 ```
@@ -37,16 +37,16 @@ LAMINART  (층판 구현, 2D, 1999)
 
 | 모델 | 핵심 역할 |
 |------|-----------|
-| **BCS** (Boundary Contour System) | 경계 형성: simple/complex/hypercomplex cell + bipole cell 그룹핑 |
-| **FCS** (Feature Contour System) | 표면 채워넣기: illuminant 보정 후 색/밝기를 FIDO 내에서 확산 |
-| **Grossberg-Todorovic model** | BCS/FCS 기반 2D 밝기 filling-in 정량 시뮬레이션 (1988) |
-| **Double filter + grouping network** | Simple→Complex→Hypercomplex→Bipole의 2단 필터 구조 [Fig 4.32] |
-| **FIDO** (Filling-In DOmain) | ON/OFF 표면 채워넣기 도메인 — FCS의 신경 구현체 |
-| **FACADE** (Form And Color And DEpth) | BCS/FCS를 3D로 확장한 비층판 시각 지각 이론 (1994/1997) |
-| **LAMINART** | BCS/FCS를 V1/V2 층판 피질 회로로 구현 + ART top-down 회로 통합 (1999) |
-| **3D LAMINART** | LAMINART의 3D 확장 = FACADE의 층판 구현 — 현존 최고 설명 범위 |
-| **Surface-shroud resonance** | V4-PPC 간 공명으로 의식적 지각 트리거 |
-| **Complex channels model** | 비교 대조용 텍스처 분리 모델 (Sutter et al.) |
+| BCS (Boundary Contour System) | 경계 형성: simple/complex/hypercomplex cell + bipole cell 그룹핑 |
+| FCS (Feature Contour System) | 표면 채워넣기: illuminant 보정 후 색/밝기를 FIDO 내에서 확산 |
+| Grossberg-Todorovic model | BCS/FCS 기반 2D 밝기 filling-in 정량 시뮬레이션 (1988) |
+| Double filter + grouping network | Simple→Complex→Hypercomplex→Bipole의 2단 필터 구조 [Fig 4.32] |
+| FIDO (Filling-In DOmain) | ON/OFF 표면 채워넣기 도메인 — FCS의 신경 구현체 |
+| FACADE (Form And Color And DEpth) | BCS/FCS를 3D로 확장한 비층판 시각 지각 이론 (1994/1997) |
+| LAMINART | BCS/FCS를 V1/V2 층판 피질 회로로 구현 + ART top-down 회로 통합 (1999) |
+| 3D LAMINART | LAMINART의 3D 확장 = FACADE의 층판 구현 — 현존 최고 설명 범위 |
+| Surface-shroud resonance | V4-PPC 간 공명으로 의식적 지각 트리거 |
+| Complex channels model | 비교 대조용 텍스처 분리 모델 (Sutter et al.) |
 
 ---
 
@@ -96,14 +96,14 @@ LAMINART  (층판 구현, 2D, 1999)
 | 4.29 | V2에서 bipole cell의 신경생리학적 증거 (von der Heydt et al., 1984) |
 | 4.30 | V1 내 장거리 수평 연결의 해부학적 증거 (Fitzpatrick lab) |
 | 4.31 | 예측된 bipole cell 수용장 — 신경생리·심리물리 데이터 및 후속 모델들 비교 |
-| 4.32 | **Double filter + grouping network** 전체 회로도 |
+| 4.32 | Double filter + grouping network 전체 회로도 |
 | 4.33 | 삼분·이분 텍스처 — emergent boundary grouping이 영역 분리 |
 | 4.34 | Complex channels model이 틀리는 텍스처 (g, i) — BCS가 정확히 시뮬레이션 |
 | 4.35 | Spatial impenetrability — pac-man 그룹핑의 허용/차단 |
 | 4.36 | Banksy 그라피티 — amodal 경계 완성과 spatial impenetrability 이용 |
 | 4.37 | Collinear vs. perpendicular Kanizsa square — bipole cell 특성 확인 |
 | 4.38 | Bipole 장거리 협력 + hypercomplex 단거리 경쟁의 합작으로 경계 생성 |
-| 4.39 | **LAMINART 모델** 개략도 — 층판 피질 해부학 및 동역학 |
+| 4.39 | LAMINART 모델 개략도 — 층판 피질 해부학 및 동역학 |
 
 ### 3부 — FACADE / 3D 깊이 지각 / 표면 채워넣기 (pp. 40–65)
 
@@ -115,7 +115,7 @@ LAMINART  (층판 구현, 2D, 1999)
 | 4.41 | Kanizsa-Minguzzi ring |
 | 4.42 | Kanizsa-Minguzzi ring percept 컴퓨터 시뮬레이션 |
 | 4.43 | (a) Bipole cell의 end cut 유발, (b) Necker cube 양안정 지각, (c) 공간 주의와 깊이/밝기 |
-| 4.44 | **FACADE macrocircuit** — LGN에서 V1·V2·V4까지 경계·표면 형성 단계 |
+| 4.44 | FACADE macrocircuit — LGN에서 V1·V2·V4까지 경계·표면 형성 단계 |
 | 4.45 | ON/OFF feature contour 활성이 filling-in 표면 영역을 만드는 방식 |
 | 4.46 | Feature contour 입력이 경계에 인접·collinear할 때 filling-in 발생 |
 | 4.47 | ON/OFF FIDO 출력 신호를 처리하는 double-opponent network |
@@ -129,8 +129,8 @@ LAMINART  (층판 구현, 2D, 1999)
 | 4.55 | V2에서의 amodal 경계·표면 완성 |
 | 4.56 | V4에서 비가려진 물체의 visible, figure-ground separated 3D 표면 표현 최종 단계 |
 | 4.57 | Unimodal/bistable 투명성 및 평면 2D 표면의 percept 예시 |
-| 4.58 | 투명성 percept를 설명하는 **LAMINART 처리 단계** 회로도 |
+| 4.58 | 투명성 percept를 설명하는 LAMINART 처리 단계 회로도 |
 
 ---
 
-총 **58개 figure** / 핵심 모델 **10개** (계보 관계 포함)
+총 58개 figure / 핵심 모델 10개 (계보 관계 포함)
