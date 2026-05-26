@@ -15,12 +15,16 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root -> import grag
+
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent / ".env")
-load_dotenv(Path.home() / ".oh-my-zsh/custom/apikey.env", override=False)
+from grag.paths import ENV_PATH, APIKEY_ENV, DATA_DIR
 
-import llm
+load_dotenv(ENV_PATH)
+load_dotenv(APIKEY_ENV, override=False)
+
+from grag import llm
 
 JUDGE = "gemini-3.1-pro-preview"
 
@@ -45,7 +49,7 @@ def _resolve(img_hash: str, content: str) -> str | None:
     m = re.search(r"(/\S+?/images/" + re.escape(img_hash) + r"\.\w+)", content)
     if m and Path(m.group(1)).exists():
         return m.group(1)
-    hits = glob.glob(f"output*/**/images/{img_hash}.*", recursive=True)
+    hits = glob.glob(str(DATA_DIR / "output*" / "**" / "images" / f"{img_hash}.*"), recursive=True)
     return hits[0] if hits else None
 
 

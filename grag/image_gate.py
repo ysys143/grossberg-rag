@@ -13,13 +13,13 @@ which fails open because dropping a real question would be worse.
 """
 import json
 import re
-from pathlib import Path
 
 import yaml
 
-import llm
+from . import llm
+from .paths import CONFIG_PATH
 
-_cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
+_cfg = yaml.safe_load(CONFIG_PATH.read_text())
 _qcfg = _cfg.get("query", {})
 GATE_MODEL = _qcfg.get("image_gate_model", "gemini-3.1-flash-lite")
 MAX_IMAGES = int(_qcfg.get("max_injected_images", 5))

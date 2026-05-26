@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from cite import _is_heading, doc_name_for, enrich_content_list
+from grag.cite import _is_heading, doc_name_for, enrich_content_list
 
 
 class TestIsHeading:

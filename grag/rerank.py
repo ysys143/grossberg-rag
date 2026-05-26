@@ -12,7 +12,7 @@ Strategy:
 """
 import json
 
-import llm
+from . import llm
 
 _RERANK_MODEL = "gemini-3.1-flash-lite"
 _MAX_DOC_CHARS = 1500
@@ -52,7 +52,7 @@ async def rerank(
     if not documents:
         return []
 
-    import tracing
+    from . import tracing
     with tracing.span("rerank", "RERANKER", input_value=query) as rspan:
         if rspan is not None:
             rspan.set_attribute("reranker.query", query)

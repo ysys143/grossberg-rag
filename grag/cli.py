@@ -28,14 +28,16 @@ except ImportError:
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent / ".env")
-load_dotenv(Path.home() / ".oh-my-zsh/custom/apikey.env", override=False)
+from .paths import ENV_PATH, APIKEY_ENV, CONFIG_PATH
+
+load_dotenv(ENV_PATH)
+load_dotenv(APIKEY_ENV, override=False)
 
 import yaml
 
-from engine import ChatSession, ask_events, _RERANK_FUNCS, _SESSIONS_DIR
-import agent as agent_mod
-import tracing
+from .engine import ChatSession, ask_events, _RERANK_FUNCS, _SESSIONS_DIR
+from . import agent as agent_mod
+from . import tracing
 
 # Pure-noise loggers stay silenced; the lightrag logger is re-routed to a Korean
 # status handler below (after the color constants it depends on are defined).
@@ -44,7 +46,7 @@ for _name in ("nano-vectordb", "nano_vectordb", "httpx", "httpcore"):
 
 tracing.init_tracing("grossberg-rag")
 
-_cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
+_cfg = yaml.safe_load(CONFIG_PATH.read_text())
 
 _DIM, _BOLD, _CYAN, _GREEN, _RESET = "\033[2m", "\033[1m", "\033[36m", "\033[32m", "\033[0m"
 # readline-safe input prompt: wrap non-printing ANSI in \001..\002 so backspace /

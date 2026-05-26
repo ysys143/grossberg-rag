@@ -3,8 +3,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import kb_tool
-from kb_tool import KBTool
+from grag import kb_tool
+from grag.kb_tool import KBTool
 
 
 @pytest.fixture

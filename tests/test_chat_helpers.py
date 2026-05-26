@@ -5,16 +5,15 @@ from pathlib import Path
 
 import pytest
 
-import chat
-from chat import (
+from grag import engine, cli
+from grag.engine import (
     _extract_sources,
     _cited_pages,
     _cited_chunks,
     _image_candidates,
     ChatSession,
-    _parse_args,
-    _session_ts,
 )
+from grag.cli import _parse_args, _session_ts
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +216,7 @@ class TestImageCandidates:
         assert _image_candidates(line) == []
 
     def test_valid_image_chunk_included(self, monkeypatch):
-        monkeypatch.setattr(chat, "_resolve_image_path",
+        monkeypatch.setattr(engine, "_resolve_image_path",
                             lambda h, c: f"/fake/images/{h}.jpg")
         line = self._make_image_line("abc123def456")
         result = _image_candidates(line)
@@ -226,12 +225,12 @@ class TestImageCandidates:
         assert result[0]["path"] == "/fake/images/abc123def456.jpg"
 
     def test_image_without_resolvable_path_excluded(self, monkeypatch):
-        monkeypatch.setattr(chat, "_resolve_image_path", lambda h, c: None)
+        monkeypatch.setattr(engine, "_resolve_image_path", lambda h, c: None)
         line = self._make_image_line("abc123def456")
         assert _image_candidates(line) == []
 
     def test_duplicate_hash_deduplicated(self, monkeypatch):
-        monkeypatch.setattr(chat, "_resolve_image_path",
+        monkeypatch.setattr(engine, "_resolve_image_path",
                             lambda h, c: f"/fake/{h}.jpg")
         line = self._make_image_line("aabbccdd1122")
         prompt = f"{line}\n{line}"
@@ -239,7 +238,7 @@ class TestImageCandidates:
         assert len(result) == 1
 
     def test_section_and_page_extracted_from_src_marker(self, monkeypatch):
-        monkeypatch.setattr(chat, "_resolve_image_path",
+        monkeypatch.setattr(engine, "_resolve_image_path",
                             lambda h, c: f"/fake/{h}.jpg")
         line = self._make_image_line("aabbccdd1122", section="FACADE", page=17)
         result = _image_candidates(line)
@@ -247,7 +246,7 @@ class TestImageCandidates:
         assert result[0]["page"] == 17
 
     def test_marker_field_extracted(self, monkeypatch):
-        monkeypatch.setattr(chat, "_resolve_image_path",
+        monkeypatch.setattr(engine, "_resolve_image_path",
                             lambda h, c: f"/fake/{h}.jpg")
         line = self._make_image_line("aabbccdd1122")
         result = _image_candidates(line)
@@ -255,7 +254,7 @@ class TestImageCandidates:
         assert "image" in result[0]["marker"]
 
     def test_multiple_distinct_images_all_included(self, monkeypatch):
-        monkeypatch.setattr(chat, "_resolve_image_path",
+        monkeypatch.setattr(engine, "_resolve_image_path",
                             lambda h, c: f"/fake/{h}.jpg")
         line1 = self._make_image_line("aabb11223344")
         line2 = self._make_image_line("ccdd55667788")
@@ -263,7 +262,7 @@ class TestImageCandidates:
         assert len(result) == 2
 
     def test_description_field_also_scanned(self, monkeypatch):
-        monkeypatch.setattr(chat, "_resolve_image_path",
+        monkeypatch.setattr(engine, "_resolve_image_path",
                             lambda h, c: f"/fake/{h}.jpg")
         content = "[src: d.pdf | §X | p.1 | image] Image Path: /output/images/aabbccddeeff.jpg"
         line = json.dumps({"description": content})
@@ -327,7 +326,7 @@ class TestChatSessionLoad:
 
 class TestChatSessionSave:
     def test_save_creates_session_file(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(chat, "_SESSIONS_DIR", tmp_path)
+        monkeypatch.setattr(engine, "_SESSIONS_DIR", tmp_path)
         sp = tmp_path / "session.json"
         sess = ChatSession("/wdir", "openai", "oneshot", sp)
         sess.history = [{"role": "user", "content": "hi"}]
@@ -335,7 +334,7 @@ class TestChatSessionSave:
         assert sp.exists()
 
     def test_saved_data_contains_history(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(chat, "_SESSIONS_DIR", tmp_path)
+        monkeypatch.setattr(engine, "_SESSIONS_DIR", tmp_path)
         sp = tmp_path / "session.json"
         sess = ChatSession("/wdir", "openai", "oneshot", sp)
         sess.history = [{"role": "user", "content": "question"}]
@@ -344,7 +343,7 @@ class TestChatSessionSave:
         assert data["history"][0]["content"] == "question"
 
     def test_saved_data_contains_provider_and_rerank(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(chat, "_SESSIONS_DIR", tmp_path)
+        monkeypatch.setattr(engine, "_SESSIONS_DIR", tmp_path)
         sp = tmp_path / "s.json"
         sess = ChatSession("/wdir", "gemini", "batched", sp)
         sess.save()
@@ -353,7 +352,7 @@ class TestChatSessionSave:
         assert data["rerank_mode"] == "batched"
 
     def test_save_is_atomic_tmp_file_removed(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(chat, "_SESSIONS_DIR", tmp_path)
+        monkeypatch.setattr(engine, "_SESSIONS_DIR", tmp_path)
         sp = tmp_path / "session.json"
         sess = ChatSession("/wdir", "openai", "oneshot", sp)
         sess.save()
@@ -361,7 +360,7 @@ class TestChatSessionSave:
         assert not tmp.exists()  # .tmp file replaced by real file
 
     def test_save_roundtrip_load(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(chat, "_SESSIONS_DIR", tmp_path)
+        monkeypatch.setattr(engine, "_SESSIONS_DIR", tmp_path)
         sp = tmp_path / "roundtrip.json"
         sess = ChatSession("/wdir", "openai", "oneshot", sp)
         sess.history = [
@@ -375,7 +374,7 @@ class TestChatSessionSave:
         assert sess2.history == sess.history
 
     def test_save_overwrites_previous(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(chat, "_SESSIONS_DIR", tmp_path)
+        monkeypatch.setattr(engine, "_SESSIONS_DIR", tmp_path)
         sp = tmp_path / "overwrite.json"
         sess = ChatSession("/wdir", "openai", "oneshot", sp)
         sess.history = [{"role": "user", "content": "first"}]
@@ -387,7 +386,7 @@ class TestChatSessionSave:
 
     def test_save_creates_sessions_dir_if_missing(self, tmp_path, monkeypatch):
         new_dir = tmp_path / "new_sessions"
-        monkeypatch.setattr(chat, "_SESSIONS_DIR", new_dir)
+        monkeypatch.setattr(engine, "_SESSIONS_DIR", new_dir)
         sp = new_dir / "s.json"
         sess = ChatSession("/wdir", "openai", "oneshot", sp)
         sess.save()
@@ -402,7 +401,7 @@ class TestChatSessionSave:
 class TestParseArgs:
     def test_defaults(self, monkeypatch, tmp_path):
         monkeypatch.setattr(sys, "argv", ["chat.py"])
-        monkeypatch.setattr(chat, "_SESSIONS_DIR", tmp_path)
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path)
         wdir, provider, rerank_mode, session_path, agent_mode = _parse_args()
         assert provider is None
         assert rerank_mode == "oneshot"
@@ -411,25 +410,25 @@ class TestParseArgs:
 
     def test_provider_flag(self, monkeypatch, tmp_path):
         monkeypatch.setattr(sys, "argv", ["chat.py", "--provider", "gemini"])
-        monkeypatch.setattr(chat, "_SESSIONS_DIR", tmp_path)
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path)
         _, provider, _, _, _ = _parse_args()
         assert provider == "gemini"
 
     def test_rerank_flag(self, monkeypatch, tmp_path):
         monkeypatch.setattr(sys, "argv", ["chat.py", "--rerank", "batched"])
-        monkeypatch.setattr(chat, "_SESSIONS_DIR", tmp_path)
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path)
         _, _, rerank_mode, _, _ = _parse_args()
         assert rerank_mode == "batched"
 
     def test_agent_flag(self, monkeypatch, tmp_path):
         monkeypatch.setattr(sys, "argv", ["chat.py", "--agent"])
-        monkeypatch.setattr(chat, "_SESSIONS_DIR", tmp_path)
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path)
         _, _, _, _, agent_mode = _parse_args()
         assert agent_mode is True
 
     def test_session_flag(self, monkeypatch, tmp_path):
         monkeypatch.setattr(sys, "argv", ["chat.py", "--session", "mysession"])
-        monkeypatch.setattr(chat, "_SESSIONS_DIR", tmp_path)
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path)
         _, _, _, session_path, _ = _parse_args()
         assert session_path.stem == "mysession"
         assert session_path.suffix == ".json"
@@ -440,25 +439,25 @@ class TestParseArgs:
         import time; time.sleep(0.01)
         (tmp_path / "newer.json").write_text("{}")
         monkeypatch.setattr(sys, "argv", ["chat.py", "--resume"])
-        monkeypatch.setattr(chat, "_SESSIONS_DIR", tmp_path)
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path)
         _, _, _, session_path, _ = _parse_args()
         assert session_path.stem == "newer"
 
     def test_resume_with_id_uses_named_session(self, monkeypatch, tmp_path):
         monkeypatch.setattr(sys, "argv", ["chat.py", "--resume", "specific_id"])
-        monkeypatch.setattr(chat, "_SESSIONS_DIR", tmp_path)
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path)
         _, _, _, session_path, _ = _parse_args()
         assert session_path.stem == "specific_id"
 
     def test_continue_flag_alias(self, monkeypatch, tmp_path):
         monkeypatch.setattr(sys, "argv", ["chat.py", "--continue"])
-        monkeypatch.setattr(chat, "_SESSIONS_DIR", tmp_path)
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path)
         # No sessions exist → fresh session path created
         _, _, _, session_path, _ = _parse_args()
         assert session_path.suffix == ".json"
 
     def test_dash_c_flag_alias(self, monkeypatch, tmp_path):
         monkeypatch.setattr(sys, "argv", ["chat.py", "-c"])
-        monkeypatch.setattr(chat, "_SESSIONS_DIR", tmp_path)
+        monkeypatch.setattr(cli, "_SESSIONS_DIR", tmp_path)
         _, _, _, session_path, _ = _parse_args()
         assert session_path.suffix == ".json"

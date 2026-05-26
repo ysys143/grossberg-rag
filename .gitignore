@@ -10,15 +10,15 @@ __pycache__/
 .env.*
 !.env.example
 
-# Runtime artifacts
+# Runtime data (indexes, parsed output, sessions, logs, source PDFs)
+/data/
+*.log
+
+# Legacy runtime artifact locations (pre-data/ layout)
 rag_storage*/
 output*/
 logs/
-*.log
-
-# Test files
-grossberg_ch4_p1.pdf
-grossberg_ch4_p3.pdf
+sessions/
 /tmp/
 
 # uv lockfile (optional — include if reproducibility needed)
@@ -33,8 +33,4 @@ grossberg_ch4_p3.pdf
 .arize-tmp-traces/
 
 # Session export artifacts
-# conversation export artifacts
 2026-*.txt
-
-# Conversation sessions
-sessions/

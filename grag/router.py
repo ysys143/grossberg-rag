@@ -22,13 +22,13 @@ medium effort, so the router can never silently swallow a real question.
 """
 import json
 import re
-from pathlib import Path
 
 import yaml
 
-import llm
+from . import llm
+from .paths import CONFIG_PATH
 
-_cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
+_cfg = yaml.safe_load(CONFIG_PATH.read_text())
 _rcfg = _cfg.get("router", {})
 ROUTER_MODEL = _rcfg.get("model", "gemini-3.1-flash-lite")
 ROUTER_ENABLED = _rcfg.get("enabled", True)

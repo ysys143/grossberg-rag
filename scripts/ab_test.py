@@ -22,25 +22,29 @@ import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root -> import grag
+
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent / ".env")
-load_dotenv(Path.home() / ".oh-my-zsh/custom/apikey.env", override=False)
+from grag.paths import ENV_PATH, APIKEY_ENV, CONFIG_PATH, LOGS_DIR
+
+load_dotenv(ENV_PATH)
+load_dotenv(APIKEY_ENV, override=False)
 
 import yaml
 from lightrag import LightRAG, QueryParam
 
-from models import (
+from grag.models import (
     llm_model_func,
     embedding_func,
     answer_model_stream,
     ANSWER_PROVIDER_DEFAULT,
 )
-from rerank import rerank as rerank_oneshot, rerank_batched
+from grag.rerank import rerank as rerank_oneshot, rerank_batched
 
-_cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
+_cfg = yaml.safe_load(CONFIG_PATH.read_text())
 
-_LOG_PATH = Path(__file__).parent / "logs" / "llm_calls.jsonl"
+_LOG_PATH = LOGS_DIR / "llm_calls.jsonl"
 
 
 def _log_offset() -> int:

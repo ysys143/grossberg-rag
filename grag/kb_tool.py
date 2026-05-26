@@ -18,16 +18,16 @@ include in a tools list.
 """
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Literal
 
 import yaml
 from lightrag import LightRAG, QueryParam
 
-from models import llm_model_func, embedding_func
-from rerank import rerank as rerank_oneshot
+from .models import llm_model_func, embedding_func
+from .rerank import rerank as rerank_oneshot
+from .paths import CONFIG_PATH
 
-_cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
+_cfg = yaml.safe_load(CONFIG_PATH.read_text())
 
 # ---------------------------------------------------------------------------
 # OpenAI function tool schema (Responses API + Chat Completions compatible)

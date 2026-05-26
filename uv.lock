@@ -1275,8 +1275,10 @@ dependencies = [
     { name = "doclayout-yolo" },
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "lightrag-hku" },
     { name = "mineru" },
     { name = "python-dotenv" },
+    { name = "python-mecab-ko" },
     { name = "pyyaml" },
     { name = "raganything", extra = ["all"] },
     { name = "transformers" },
@@ -1295,8 +1297,10 @@ requires-dist = [
     { name = "doclayout-yolo" },
     { name = "fastapi", specifier = ">=0.136.3" },
     { name = "httpx", specifier = ">=0.27.0" },
+    { name = "lightrag-hku", specifier = "==1.4.16" },
     { name = "mineru", specifier = "==2.1.5" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "python-mecab-ko", specifier = ">=1.3.7" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "raganything", extras = ["all"] },
     { name = "transformers", specifier = "==4.53.3" },
@@ -3195,6 +3199,34 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/82/ed/0301aeeac3e5353ef3d94b6ec08bbcabd04a72018415dcb29e588514bba8/python_dotenv-1.2.2.tar.gz", hash = "sha256:2c371a91fbd7ba082c2c1dc1f8bf89ca22564a087c2c287cd9b662adde799cf3", size = 50135 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0b/d7/1959b9648791274998a9c3526f6d0ec8fd2233e4d4acce81bbae76b44b2a/python_dotenv-1.2.2-py3-none-any.whl", hash = "sha256:1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a", size = 22101 },
+]
+
+[[package]]
+name = "python-mecab-ko"
+version = "1.3.7"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-mecab-ko-dic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5b/22/81584e36d231b009075b6440da0eda4400f7293f853097b028263074f280/python_mecab_ko-1.3.7.tar.gz", hash = "sha256:69cbb2ac559a3169c22b1a3aa5d3c247d2f7902d9fe7dc9966189a9c7694af0b", size = 13830 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c2/7a/980c48f19367353da0d0ea4ffc5c73be0893987bc4c8bf4522391b4e0b14/python_mecab_ko-1.3.7-cp312-cp312-macosx_10_9_x86_64.whl", hash = "sha256:7721f69381dac572a1598e5906cc5faba233ed48bc6ff8672082a519d7db0ba1", size = 414066 },
+    { url = "https://files.pythonhosted.org/packages/ee/3d/8c13f7d6cbcc9b84b1797552de60fc2ff10012d801598b75aa41ff17db41/python_mecab_ko-1.3.7-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:eae5eb6178b06019e3773e9dde126dd29df5ed417406be5611ebdd0f8839c1e1", size = 349619 },
+    { url = "https://files.pythonhosted.org/packages/e7/01/3a4032f78370375d79b7f6b7eaa1602a4070d28dee8f7f3dfa8c87e73940/python_mecab_ko-1.3.7-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:8e90e8c1009f8f6aa0dfc43c916ff481dc79aa5a7e528a41a193add9c61ac6d1", size = 560604 },
+    { url = "https://files.pythonhosted.org/packages/f4/cb/169c68047a569e2e4f2a2243c4576df72255d1a4ab0b5a286ff75bc41a76/python_mecab_ko-1.3.7-cp312-cp312-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:a205ca4da908df39d6d70f968426d0e9dc79274a6d34b13a5588ab52f0e12be8", size = 602363 },
+    { url = "https://files.pythonhosted.org/packages/aa/88/dd2e5e7d44351bba0c9fb462273df9dcd43c3e000bfd0a4279e52584e2f7/python_mecab_ko-1.3.7-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:3c0e98a7d94278f4f5d93f03e35cc8044460c0076ab4698b764d5c44bd897dbe", size = 579619 },
+    { url = "https://files.pythonhosted.org/packages/f9/e0/426d401c6d12442ad564546d690ef174ff99a4ecd24e1e263616314ecf03/python_mecab_ko-1.3.7-cp312-cp312-win32.whl", hash = "sha256:3145c53772e842a046fdbf0659f0e5235e16d51b0bb8c0d3e8e078dc57d22373", size = 562212 },
+    { url = "https://files.pythonhosted.org/packages/30/60/0e898750bf06b23bb2b270cd6273c5820254b6f6c453459ff5ef4a04ac13/python_mecab_ko-1.3.7-cp312-cp312-win_amd64.whl", hash = "sha256:3387906e66109989603b877899d1ae3a0132795c9c73ad91a5e7c4c077177351", size = 653484 },
+    { url = "https://files.pythonhosted.org/packages/cc/78/dc974259c3571a2436041c338a7a95a62e47c3da62c973fa98a55ab6399f/python_mecab_ko-1.3.7-cp312-cp312-win_arm64.whl", hash = "sha256:13126509630e47fc89a8c575f5af3eed1bc09370e978b331caf32325e6b98383", size = 785719 },
+]
+
+[[package]]
+name = "python-mecab-ko-dic"
+version = "2.1.1.post2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b5/cc/0188ca47e3d508c0961fb915ab9c71fd6facc821afb906e7b9080009d4ec/python-mecab-ko-dic-2.1.1.post2.tar.gz", hash = "sha256:2c423713bdc475345ec98cd084b30759458f8f06c38a9ef94ab8687942c2cd34", size = 34179115 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4e/63/23fb02dd36d96527eb0c93300e8db22ab42805c1a232af621c5a8f175e37/python_mecab_ko_dic-2.1.1.post2-py3-none-any.whl", hash = "sha256:ef8f4e80c8976f1340a7264abb0c96f384fe059fd897584aeba0151753c6ae9b", size = 34457665 },
 ]
 
 [[package]]

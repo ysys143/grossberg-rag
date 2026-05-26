@@ -27,11 +27,13 @@ from typing import AsyncIterator
 
 import httpx
 
+from .paths import LOGS_DIR
+
 _BASE = "https://generativelanguage.googleapis.com/v1beta"
 _OPENAI_BASE = "https://api.openai.com/v1"
 _TIMEOUT = 120
 
-_LOG_PATH = Path(__file__).parent / "logs" / "llm_calls.jsonl"
+_LOG_PATH = LOGS_DIR / "llm_calls.jsonl"
 _LOG_FULL = os.environ.get("LLM_LOG_FULL", "0") == "1"
 _PREVIEW_CHARS = 300
 
@@ -188,7 +190,7 @@ def _log_call(
 
     # Emit OpenInference span (no-op if tracing disabled)
     try:
-        import tracing
+        from . import tracing
         tracing.emit_llm_span(
             fn_name=fn_name, model=model, prompt=prompt, response=response_text,
             usage=usage, elapsed_s=elapsed, status=status,
@@ -450,7 +452,7 @@ async def _log_stream_summary(fn_name: str, model: str, prompt: str | None,
         f"{system_prompt}\n\n---User Query---\n\n{prompt}" if system_prompt else prompt
     )
     try:
-        import tracing
+        from . import tracing
         tracing.emit_llm_span(
             fn_name=fn_name, model=model, prompt=span_input,
             response="".join(answer_buf), usage=usage, elapsed_s=elapsed,

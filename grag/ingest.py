@@ -32,21 +32,23 @@ os.environ["PATH"] = _venv_bin + os.pathsep + os.environ.get("PATH", "")
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent / ".env")
-load_dotenv(Path.home() / ".oh-my-zsh/custom/apikey.env", override=False)
+from .paths import ENV_PATH, APIKEY_ENV, CONFIG_PATH
+
+load_dotenv(ENV_PATH)
+load_dotenv(APIKEY_ENV, override=False)
 
 import yaml
 from raganything import RAGAnything
 from raganything.config import RAGAnythingConfig
 
-from models import llm_model_func, vision_model_func, embedding_func
-from cite import enrich_content_list, doc_name_for
-import tracing
+from .models import llm_model_func, vision_model_func, embedding_func
+from .cite import enrich_content_list, doc_name_for
+from . import tracing
 
 tracing.init_tracing("grossberg-rag")
 _tracer = tracing.get_tracer()
 
-_cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
+_cfg = yaml.safe_load(CONFIG_PATH.read_text())
 
 _WAL = ".wal.json"
 

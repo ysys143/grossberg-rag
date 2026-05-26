@@ -18,6 +18,7 @@ Event types yielded by ask_events:
   {"type":"sources","items":[{"marker":str,"injected":bool}]}
   {"type":"done","cited":int,"summarized":bool}
 """
+import asyncio
 import glob
 import json
 import logging
@@ -29,22 +30,24 @@ from typing import AsyncIterator
 import yaml
 from lightrag import LightRAG, QueryParam
 
-from models import (
+from .models import (
     llm_model_func, embedding_func, answer_model_stream,
     ANSWER_PROVIDER_DEFAULT, is_vision_capable,
 )
-from rerank import rerank as rerank_oneshot, rerank_batched
-import image_gate
-import llm
-import router
-import tracing
+from .rerank import rerank as rerank_oneshot, rerank_batched
+from . import image_gate
+from . import llm
+from . import router
+from . import expand
+from . import tracing
+from .paths import CONFIG_PATH, SESSIONS_DIR, DATA_DIR
 
-_cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
+_cfg = yaml.safe_load(CONFIG_PATH.read_text())
 _MARKER = "\n\n---User Query---\n\n"
 _RERANK_FUNCS = {"none": None, "oneshot": rerank_oneshot, "batched": rerank_batched}
 _HISTORY_TURNS = 6  # how many prior turns LightRAG folds into retrieval/context
 _SUMMARIZE_MODEL = "gemini-3.1-flash-lite"  # cheap, thinking-off summarizer
-_SESSIONS_DIR = Path(__file__).parent / "sessions"  # persisted conversation history
+_SESSIONS_DIR = SESSIONS_DIR  # persisted conversation history
 _INJECT_IMAGES = bool(_cfg["query"].get("inject_images", False))  # query-time figure re-injection
 
 # LightRAG emits English INFO logs during retrieval. We silence its console and,
@@ -153,7 +156,7 @@ def _resolve_image_path(img_hash: str, content: str) -> str | None:
     m = re.search(r"(/\S+?/images/" + re.escape(img_hash) + r"\.\w+)", content)
     if m and Path(m.group(1)).exists():
         return m.group(1)
-    hits = glob.glob(f"output*/**/images/{img_hash}.*", recursive=True)
+    hits = glob.glob(str(DATA_DIR / "output*" / "**" / "images" / f"{img_hash}.*"), recursive=True)
     return hits[0] if hits else None
 
 
@@ -252,6 +255,7 @@ class ChatSession:
         self.last_image_sources: list[str] = []   # [src:...|image] markers injected last turn
         self.rag: LightRAG | None = None
         self.pending_question: str | None = None  # original Q awaiting HITL clarification
+        self.corpus_lang: str = "en"  # language of the index; target for keyword expansion
 
     def load(self) -> int:
         """Restore history. Returns prior turn count."""
@@ -263,7 +267,7 @@ class ChatSession:
 
     def save(self) -> None:
         """Atomic write of the session so a crash mid-turn can't corrupt it."""
-        _SESSIONS_DIR.mkdir(exist_ok=True)
+        _SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         data = {
             "updated_at": datetime.now().isoformat(timespec="seconds"),
             "working_dir": self.working_dir,
@@ -283,6 +287,19 @@ class ChatSession:
             rerank_model_func=_RERANK_FUNCS[self.rerank_mode],
         )
         await self.rag.initialize_storages()
+        if _cfg["query"].get("hybrid_seed"):
+            try:
+                from . import hybrid_seed
+                hybrid_seed.attach_hybrid_seed(
+                    self.rag, self.working_dir,
+                    top_k=int(_cfg["query"].get("hybrid_seed_top_k", 10)),
+                )
+            except Exception as e:  # fail-open: an enhancement, never block startup
+                logging.getLogger("grag.hybrid_seed").warning(
+                    f"hybrid_seed disabled (init failed): {type(e).__name__}: {e}")
+        if _cfg["query"].get("expand_keywords"):
+            cl = _cfg["query"].get("expand_lang", "auto")
+            self.corpus_lang = expand.detect_corpus_lang(self.working_dir) if cl == "auto" else cl
 
     async def teardown(self):
         if self.rag is not None:
@@ -301,7 +318,16 @@ async def ask_events(session: ChatSession, question: str,
     tracer = tracing.get_tracer()
 
     yield {"type": "status", "msg": "질문 유형을 분석하고 있습니다...", "detail": False}
-    decision = await router.route(question, session.history)
+    # Run the router and (optionally) corpus-language keyword expansion concurrently —
+    # both are cheap flash-lite calls, so the expansion adds ~no wall-clock latency.
+    if _cfg["query"].get("expand_keywords"):
+        decision, kw = await asyncio.gather(
+            router.route(question, session.history),
+            expand.expand_keywords(question, session.corpus_lang, session.history),
+        )
+    else:
+        decision = await router.route(question, session.history)
+        kw = {"concepts": [], "entities": []}
 
     if not decision["in_scope"]:
         msg = ("이 질문은 문서(Grossberg 시각 지각 신경 모델) 범위를 벗어납니다. "
@@ -333,6 +359,13 @@ async def ask_events(session: ChatSession, question: str,
         if need:
             yield {"type": "status",
                    "msg": f"「{question}」 관련 내용을 검색 중입니다...", "detail": False}
+            # Inject corpus-language keywords when expansion produced any; empty lists are
+            # equivalent to not passing them (LightRAG then runs its own extractor).
+            hl, ll = kw.get("concepts") or [], kw.get("entities") or []
+            if hl or ll:
+                yield {"type": "status",
+                       "msg": f"검색 키워드({session.corpus_lang}): {', '.join((hl + ll)[:8])}",
+                       "detail": True}
             cap = _LRCapture()  # collect LightRAG's query-stage logs during aquery
             _lr_logger.addHandler(cap)
             try:
@@ -344,6 +377,8 @@ async def ask_events(session: ChatSession, question: str,
                         enable_rerank=(fn is not None),
                         conversation_history=session.history[-_HISTORY_TURNS * 2:],
                         history_turns=_HISTORY_TURNS,
+                        hl_keywords=hl,
+                        ll_keywords=ll,
                     ),
                 )
             finally:

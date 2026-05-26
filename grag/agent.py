@@ -18,18 +18,18 @@ No SDK dependency — all HTTP via httpx (consistent with llm.py / embedding.py)
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import AsyncIterator
 
 import httpx
 import yaml
 
-import llm
-import router as router_mod
-from kb_tool import KBTool, SCHEMA as KB_SCHEMA
-from models import answer_model_stream, ANSWER_OPENAI, ANSWER_PROVIDER_DEFAULT, ANSWER_STYLE_PROMPT
+from . import llm
+from . import router as router_mod
+from .kb_tool import KBTool, SCHEMA as KB_SCHEMA
+from .models import answer_model_stream, ANSWER_OPENAI, ANSWER_PROVIDER_DEFAULT, ANSWER_STYLE_PROMPT
+from .paths import CONFIG_PATH, ENV_PATH, APIKEY_ENV
 
-_cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
+_cfg = yaml.safe_load(CONFIG_PATH.read_text())
 _acfg = _cfg.get("agent", {})
 
 MAX_TOOL_ROUNDS: int = _acfg.get("max_tool_rounds", 4)
@@ -249,11 +249,10 @@ async def run_agent_stream(
 if __name__ == "__main__":
     import asyncio
     import sys
-    from pathlib import Path
     from dotenv import load_dotenv
 
-    load_dotenv(Path(__file__).parent / ".env")
-    load_dotenv(Path.home() / ".oh-my-zsh/custom/apikey.env", override=False)
+    load_dotenv(ENV_PATH)
+    load_dotenv(APIKEY_ENV, override=False)
 
     _DIM   = "\033[2m"
     _BOLD  = "\033[1m"

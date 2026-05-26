@@ -6,17 +6,18 @@ Endpoint: POST /v1beta/models/{model}:batchEmbedContents
 import asyncio
 import os
 import time
-from pathlib import Path
 
 import httpx
 import yaml
+
+from .paths import CONFIG_PATH
 
 _BASE = "https://generativelanguage.googleapis.com/v1beta"
 _TIMEOUT = 60
 
 # Cap concurrent embedding calls so bulk re-ingest (hundreds of entity/relation
 # embeddings fired at once) stays under the gemini-embedding rate limit (429).
-_cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
+_cfg = yaml.safe_load(CONFIG_PATH.read_text())
 _CONCURRENCY = int(_cfg.get("models", {}).get("embedding_concurrency", 4))
 _MAX_RETRIES = 5
 _sem = asyncio.Semaphore(_CONCURRENCY)
@@ -70,7 +71,7 @@ async def embed_texts(model: str, texts: list[str]) -> list[list[float]]:
                 break
 
     try:
-        import tracing
+        from . import tracing
         tracing.emit_llm_span(
             fn_name="embed_texts", model=model,
             prompt=f"{len(texts)} texts", response=f"{len(result)} vectors",

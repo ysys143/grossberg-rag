@@ -15,19 +15,21 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent / ".env")
-load_dotenv(Path.home() / ".oh-my-zsh/custom/apikey.env", override=False)
+from .paths import ENV_PATH, APIKEY_ENV, CONFIG_PATH, STATIC_DIR
+
+load_dotenv(ENV_PATH)
+load_dotenv(APIKEY_ENV, override=False)
 
 import yaml
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from engine import ChatSession, ask_events, _SESSIONS_DIR, _resolve_image_path
-import tracing
+from .engine import ChatSession, ask_events, _SESSIONS_DIR, _resolve_image_path
+from . import tracing
 
-_cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
-_STATIC = Path(__file__).parent / "static"
+_cfg = yaml.safe_load(CONFIG_PATH.read_text())
+_STATIC = STATIC_DIR
 _HASH_RE = re.compile(r"^[a-f0-9]{8,}$")  # guard against path traversal in /img/{hash}
 _lock = asyncio.Lock()  # serialize turns (shared session state is not concurrency-safe)
 

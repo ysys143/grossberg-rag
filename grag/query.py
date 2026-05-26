@@ -12,20 +12,22 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent / ".env")
-load_dotenv(Path.home() / ".oh-my-zsh/custom/apikey.env", override=False)
+from .paths import ENV_PATH, APIKEY_ENV, CONFIG_PATH
+
+load_dotenv(ENV_PATH)
+load_dotenv(APIKEY_ENV, override=False)
 
 import yaml
 from lightrag import LightRAG, QueryParam
 
-from models import llm_model_func, embedding_func, answer_model_stream, ANSWER_PROVIDER_DEFAULT
-from rerank import rerank as rerank_oneshot, rerank_batched
-import tracing
+from .models import llm_model_func, embedding_func, answer_model_stream, ANSWER_PROVIDER_DEFAULT
+from .rerank import rerank as rerank_oneshot, rerank_batched
+from . import tracing
 
 tracing.init_tracing("grossberg-rag")
 _tracer = tracing.get_tracer()
 
-_cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
+_cfg = yaml.safe_load(CONFIG_PATH.read_text())
 
 _SAMPLE_QUESTIONS = [
     "What is the main theoretical framework introduced in this chapter?",

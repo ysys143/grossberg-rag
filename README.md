@@ -15,17 +15,23 @@ uv sync
 # OPENAI_API_KEY, GOOGLE_API_KEY
 
 # 인덱싱 (62페이지, 첫 1회만 — 약 30분)
-.venv/bin/python ingest.py
+.venv/bin/python -m grag.ingest
 
 # 단일 질의
-.venv/bin/python query.py "FACADE 이론이란?"
+.venv/bin/python -m grag.query "FACADE 이론이란?"
 
 # 대화형 CLI
-.venv/bin/python chat.py
+.venv/bin/python -m grag.cli
 
 # 에이전트 모드 (멀티스텝 검색 + 웹검색)
-.venv/bin/python chat.py --agent
+.venv/bin/python -m grag.cli --agent
+
+# 웹 앱 (CLI와 동일 엔진 + figure 이미지 표시)
+.venv/bin/uvicorn grag.server:app   # http://127.0.0.1:8000
 ```
+
+> 모든 명령은 **저장소 루트에서** 실행한다 (`grag` 패키지가 import되도록).
+> 런타임 데이터(인덱스·파싱 출력·세션·로그·PDF)는 전부 `data/` 아래에 있다.
 
 ---
 
@@ -38,16 +44,32 @@ uv sync
        → Vision description       gemini-3.1-flash-lite
        → Embedding                gemini-embedding-2 (3072d)
 
-쿼리 (query.py / chat.py):
-  질문 → router.py → LightRAG hybrid retrieval → rerank → answer stream
-                                                           gpt-5.5 | gemini-3.1-pro-preview
+쿼리 (grag.query / grag.cli / grag.server):
+  질문 → router → LightRAG hybrid retrieval → rerank → answer stream
+                                                       gpt-5.5 | gemini-3.1-pro-preview
 
-에이전트 쿼리 (chat.py --agent):
-  질문 → router.py → tool-calling loop (search_knowledge + web_search_preview)
-                   → streaming final answer (동일 대화 이어서)
+에이전트 쿼리 (grag.cli --agent):
+  질문 → router → tool-calling loop (search_knowledge + web_search_preview)
+                → streaming final answer (동일 대화 이어서)
 ```
 
+CLI와 웹 서버는 동일한 이벤트 엔진(`grag/engine.py`)을 소비한다 — 로직은 엔진에,
+표현만 소비자(CLI는 stdout, 웹은 SSE+이미지)에 둬서 양쪽이 절대 어긋나지 않는다.
 모든 LLM/Embedding 호출은 `httpx` 직접 HTTP — SDK 의존성 없음.
+
+### 디렉토리 레이아웃
+
+```
+grag/            패키지 (소스 + prompts/ + static/)
+  paths.py       모든 경로의 단일 출처 (config·data·assets)
+  engine.py      이벤트 yield 채팅 엔진 (CLI·웹 공용)
+  cli.py server.py   진입점 (python -m grag.cli / uvicorn grag.server:app)
+scripts/         일회성 분석 스크립트 (ab_test, measure_*, patch_*)
+tests/           pytest 스위트
+docs/            설계 노트
+data/            런타임 데이터 (gitignored): rag_storage/ output/ sessions/ logs/ pdfs/
+config.yaml      모델·경로·파서 설정의 단일 출처
+```
 
 ---
 
@@ -71,13 +93,13 @@ uv sync
 ## CLI 옵션
 
 ```bash
-# query.py
-.venv/bin/python query.py [--provider openai|gemini] [--rerank none|oneshot|batched] "질문"
+# 단일 질의
+.venv/bin/python -m grag.query [--provider openai|gemini] [--rerank none|oneshot|batched] "질문"
 
-# chat.py
-.venv/bin/python chat.py [--provider openai|gemini] [--rerank none|oneshot|batched]
-                         [--agent]
-                         [--session NAME] [--resume [ID]]
+# 대화형 CLI
+.venv/bin/python -m grag.cli [--provider openai|gemini] [--rerank none|oneshot|batched]
+                             [--agent]
+                             [--session NAME] [--resume [ID]]
 
 # 세션 중 명령
 /provider <name>   답변 모델 전환
@@ -95,21 +117,25 @@ uv sync
 
 | 파일 | 역할 |
 |------|------|
-| `config.yaml` | 모델·경로·파서 설정의 단일 출처 |
-| `ingest.py` | 문서 인덱싱. WAL 멱등성, `--force` cascade purge |
-| `query.py` | 단일 질의 |
-| `chat.py` | 멀티턴 CLI. `--agent`로 에이전트 루프 전환 |
-| `agent.py` | Responses API tool-calling 루프 + 통합 스트리밍 |
-| `kb_tool.py` | LightRAG KB를 OpenAI function tool로 노출 |
-| `router.py` | 질의 전 분류기(flash-lite). scope / effort / clarification |
-| `image_gate.py` | 쿼리 시점 이미지 관련성 게이트(flash-lite). fail-closed |
-| `models.py` | LightRAG 콜백 + provider 라우팅 + style prepend |
-| `llm.py` | Gemini/OpenAI HTTP 클라이언트. 비스트리밍 + 스트리밍, reasoning 캡처 |
-| `embedding.py` | Gemini batchEmbedContents. 동시성 throttle + 429 백오프 |
-| `rerank.py` | LLM 기반 reranker. one-shot / batched |
-| `cite.py` | `[src: 문서 \| §섹션 \| p.페이지]` 출처 마커 주입 |
-| `tracing.py` | Arize AX OpenInference manual span |
-| `prompts/answer_system.md` | 응답 톤·언어·포맷 가이드 (교체 가능) |
+| `config.yaml` | 모델·경로·파서 설정의 단일 출처 (저장소 루트) |
+| `grag/paths.py` | config·data·assets 경로의 단일 출처 |
+| `grag/ingest.py` | 문서 인덱싱. WAL 멱등성, `--force` cascade purge |
+| `grag/query.py` | 단일 질의 |
+| `grag/cli.py` | 멀티턴 CLI. `--agent`로 에이전트 루프 전환 |
+| `grag/server.py` | FastAPI 웹 서버. engine 이벤트를 SSE로 + figure 이미지 |
+| `grag/engine.py` | 이벤트 yield 채팅 엔진 (CLI·웹 공용 단일 출처) |
+| `grag/agent.py` | Responses API tool-calling 루프 + 통합 스트리밍 |
+| `grag/kb_tool.py` | LightRAG KB를 OpenAI function tool로 노출 |
+| `grag/router.py` | 질의 전 분류기(flash-lite). scope / effort / clarification |
+| `grag/image_gate.py` | 쿼리 시점 이미지 관련성 게이트(flash-lite). fail-closed |
+| `grag/models.py` | LightRAG 콜백 + provider 라우팅 + style prepend |
+| `grag/llm.py` | Gemini/OpenAI HTTP 클라이언트. 비스트리밍 + 스트리밍, reasoning 캡처 |
+| `grag/embedding.py` | Gemini batchEmbedContents. 동시성 throttle + 429 백오프 |
+| `grag/rerank.py` | LLM 기반 reranker. one-shot / batched |
+| `grag/cite.py` | `[src: 문서 \| §섹션 \| p.페이지]` 출처 마커 주입 |
+| `grag/tracing.py` | Arize AX OpenInference manual span |
+| `grag/prompts/answer_system.md` | 응답 톤·언어·포맷 가이드 (교체 가능) |
+| `grag/static/index.html` | 웹 앱 단일 페이지 (vanilla JS, 빌드 없음) |
 
 ---
 
@@ -139,6 +165,50 @@ router:
   model: gemini-3.1-flash-lite
   thinking_budget: {low: 512, medium: 4096, high: -1}
 ```
+
+---
+
+## Claude Code 스킬 (`grossberg-ask`)
+
+Claude Code에서 `grossberg-ask` 스킬로 KB를 직접 질의할 수 있다.
+스킬이 `query_kb.py`를 호출해 `[src:]` 마커가 붙은 컨텍스트 청크를 가져오고,
+Claude가 직접 종합·인용 답변을 작성한다 — 별도 LLM 생성 단계 없음.
+
+```bash
+# 스킬 설치 경로
+~/.claude/skills/grossberg-ask/scripts/query_kb.py
+
+# 단일 질의 (local 모드 → 자동 캡 8,000자)
+uv run python ~/.claude/skills/grossberg-ask/scripts/query_kb.py \
+  --query "bipole cell boundary completion" \
+  --entities "bipole cell" BCS --mode local
+
+# 멀티 질의 + mix 모드 (3쿼리 → 자동 캡 40,000자)
+uv run python ~/.claude/skills/grossberg-ask/scripts/query_kb.py \
+  --query "BCS FACADE overview" \
+  --query "LAMINART cortical layers" \
+  --query "figure-ground filling-in" \
+  --mode mix
+
+# figure 이미지 포함
+uv run python ~/.claude/skills/grossberg-ask/scripts/query_kb.py \
+  --query "BCS circuit diagram" --mode hybrid --with-images
+
+# 원시 출력 (디버깅)
+uv run python ~/.claude/skills/grossberg-ask/scripts/query_kb.py \
+  --query "..." --full
+```
+
+**출력 캡 자동 계산** — `--max-chars` 미지정 시 모드와 쿼리 수에서 자동 결정:
+
+| 모드 | 기본 캡 | 스케일 (쿼리 n개) |
+|------|---------|-----------------|
+| `local` | 8,000 | `× max(1, n//2+1)` |
+| `hybrid` | 12,000 | 동일 |
+| `global` | 15,000 | 동일 |
+| `mix` | 20,000 | 동일 |
+
+`--max-chars N`은 자동값이 부족한 예외 상황에만 사용한다.
 
 ---
 

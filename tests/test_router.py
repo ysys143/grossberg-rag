@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import router
+from grag import router
 
 
 class TestParse:
@@ -130,7 +130,7 @@ class TestRoute:
         assert result["needs_clarification"] is False
 
     async def test_successful_route_parses_llm_response(self, monkeypatch):
-        import llm as llm_mod
+        from grag import llm as llm_mod
         payload = json.dumps({
             "in_scope": True, "needs_retrieval": True,
             "effort": "medium", "needs_clarification": False, "clarification": "",
@@ -141,7 +141,7 @@ class TestRoute:
         assert result["effort"] == "medium"
 
     async def test_llm_exception_fails_open(self, monkeypatch):
-        import llm as llm_mod
+        from grag import llm as llm_mod
         async def boom(*a, **kw):
             raise RuntimeError("network timeout")
         monkeypatch.setattr(llm_mod, "generate", boom)
@@ -152,7 +152,7 @@ class TestRoute:
         assert "router-failopen" in result["reason"]
 
     async def test_llm_json_exception_fails_open(self, monkeypatch):
-        import llm as llm_mod
+        from grag import llm as llm_mod
         async def returns_garbage(*a, **kw):
             raise json.JSONDecodeError("err", "", 0)
         monkeypatch.setattr(llm_mod, "generate", returns_garbage)
@@ -160,7 +160,7 @@ class TestRoute:
         assert result["in_scope"] is True
 
     async def test_history_passed_to_llm_prompt(self, monkeypatch):
-        import llm as llm_mod
+        from grag import llm as llm_mod
         captured = []
         async def capture(model, prompt, **kw):
             captured.append(prompt)
@@ -174,7 +174,7 @@ class TestRoute:
         assert "이전 질문이에요" in captured[0]
 
     async def test_history_trimmed_to_last_four(self, monkeypatch):
-        import llm as llm_mod
+        from grag import llm as llm_mod
         captured = []
         async def capture(model, prompt, **kw):
             captured.append(prompt)
@@ -189,7 +189,7 @@ class TestRoute:
         assert "msg5" in prompt
 
     async def test_empty_history_does_not_prepend_context(self, monkeypatch):
-        import llm as llm_mod
+        from grag import llm as llm_mod
         captured = []
         async def capture(model, prompt, **kw):
             captured.append(prompt)
@@ -199,7 +199,7 @@ class TestRoute:
         assert "Recent conversation" not in captured[0]
 
     async def test_router_disabled_ignores_llm(self, monkeypatch):
-        import llm as llm_mod
+        from grag import llm as llm_mod
         monkeypatch.setattr(router, "ROUTER_ENABLED", False)
         called = []
         monkeypatch.setattr(llm_mod, "generate", AsyncMock(side_effect=lambda *a, **kw: called.append(1)))

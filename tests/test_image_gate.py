@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import image_gate
+from grag import image_gate
 
 
 class TestParse:
@@ -74,7 +74,7 @@ class TestSelectRelevantImages:
         assert result == []
 
     async def test_llm_error_fails_closed_returns_empty(self, monkeypatch):
-        import llm
+        from grag import llm
         async def boom(*a, **kw):
             raise RuntimeError("api error")
         monkeypatch.setattr(llm, "generate", boom)
@@ -83,7 +83,7 @@ class TestSelectRelevantImages:
         assert result == []
 
     async def test_valid_selection_returns_hashes(self, monkeypatch):
-        import llm
+        from grag import llm
         monkeypatch.setattr(llm, "generate", AsyncMock(return_value='{"relevant": [1, 0]}'))
         candidates = [
             {"hash": "hash0", "caption": "fig0", "section": "A", "page": 1},
@@ -93,7 +93,7 @@ class TestSelectRelevantImages:
         assert result == ["hash1", "hash0"]
 
     async def test_order_matches_parse_order(self, monkeypatch):
-        import llm
+        from grag import llm
         # Most relevant first = index 2, then 0
         monkeypatch.setattr(llm, "generate", AsyncMock(return_value='{"relevant": [2, 0]}'))
         candidates = [
@@ -106,7 +106,7 @@ class TestSelectRelevantImages:
         assert result[1] == "h0"
 
     async def test_max_images_cap_enforced(self, monkeypatch):
-        import llm
+        from grag import llm
         # Return all 10 indices as relevant
         monkeypatch.setattr(llm, "generate", AsyncMock(
             return_value='{"relevant": [0,1,2,3,4,5,6,7,8,9]}'
@@ -119,14 +119,14 @@ class TestSelectRelevantImages:
         assert len(result) <= image_gate.MAX_IMAGES
 
     async def test_no_relevant_returns_empty(self, monkeypatch):
-        import llm
+        from grag import llm
         monkeypatch.setattr(llm, "generate", AsyncMock(return_value='{"relevant": []}'))
         candidates = [{"hash": "h0", "caption": "fig", "section": "A", "page": 1}]
         result = await image_gate.select_relevant_images("q", candidates)
         assert result == []
 
     async def test_out_of_range_indices_silently_dropped(self, monkeypatch):
-        import llm
+        from grag import llm
         # Only 1 candidate (index 0 valid), model returns index 5 (invalid)
         monkeypatch.setattr(llm, "generate", AsyncMock(return_value='{"relevant": [5, 0]}'))
         candidates = [{"hash": "h0", "caption": "fig", "section": "A", "page": 1}]
@@ -134,7 +134,7 @@ class TestSelectRelevantImages:
         assert result == ["h0"]
 
     async def test_llm_network_timeout_fails_closed(self, monkeypatch):
-        import llm
+        from grag import llm
         async def slow(*a, **kw):
             raise TimeoutError("timeout")
         monkeypatch.setattr(llm, "generate", slow)
@@ -143,7 +143,7 @@ class TestSelectRelevantImages:
         assert result == []
 
     async def test_long_caption_truncated_in_prompt(self, monkeypatch):
-        import llm
+        from grag import llm
         captured = []
         async def capture(model, prompt, **kw):
             captured.append(prompt)

@@ -2,16 +2,15 @@
 RAGAnything adapter layer.
 Reads config.yaml and wires llm.py + embedding.py into RAGAnything-compatible async functions.
 """
-from pathlib import Path
-
 import numpy as np
 import yaml
 from lightrag.utils import EmbeddingFunc
 
-import llm
-import embedding as emb
+from . import llm
+from . import embedding as emb
+from .paths import CONFIG_PATH, PKG_DIR
 
-_cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
+_cfg = yaml.safe_load(CONFIG_PATH.read_text())
 _m = _cfg["models"]
 
 LLM_MODEL = _m["llm"]
@@ -39,7 +38,7 @@ _EFFORT_BUDGET = _cfg.get("router", {}).get(
 )
 
 # Load style guide once at import. Swappable: point config.yaml at a different .md
-_style_path = Path(__file__).parent / _ans.get("system_prompt", "prompts/answer_system.md")
+_style_path = PKG_DIR / _ans.get("system_prompt", "prompts/answer_system.md")
 ANSWER_STYLE_PROMPT = _style_path.read_text() if _style_path.exists() else ""
 
 

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import agent
+from grag import agent
 
 
 # ---------------------------------------------------------------------------
