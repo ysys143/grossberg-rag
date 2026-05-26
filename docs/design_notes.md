@@ -249,6 +249,24 @@ Grossberg *Conscious Mind, Resonant Brain* 4장(62p)의 멀티모달 RAG. 단일
 - **`collected_context` 제거**: 더 이상 tool 결과를 별도로 수집해 재조합할 필요 없음. `input_messages`가 이미 모든 컨텍스트를 담고 있음.
 - **배운 점**: Responses API의 tool-calling 대화는 function_call_output 항목이 마지막일 때 streaming 호출로 자연스럽게 이어짐 — 별도 재조합 없이 하나의 일관된 대화.
 
+### 4.23 **BM25 하이브리드 엔티티 시딩 (hybrid_seed.py)**
+- **문제**: LightRAG의 `hybrid` 모드는 KG를 쓰지만 **시드 선정이 벡터 kNN 단독**이다 (`operate._get_node_data` → `entities_vdb.query`). 임베딩이 낮게 매긴 정확 명칭·약어·Figure번호(`FACADE`, `BCS`, `Figure 4.25`)는 시드에서 누락되고, 그 엔티티의 서브그래프(관계·이웃·청크) 전체가 컨텍스트에서 사라진다.
+- **해결**: 시작 시 엔티티 `content`로 자체 Okapi BM25 인덱스(Lucene식 비음수 idf)를 빌드하고, **`entities_vdb.query`를 인스턴스 단위로 래핑**해 벡터 히트 ∪ BM25 히트(entity_name dedup)를 반환. 래핑이므로 이후 그래프 fetch·엣지 확장은 **변경 없는** `_get_node_data`를 그대로 통과 → BM25 시드도 동일한 그래프 처리를 받는다. 모듈 함수 재구현(브리틀) 회피.
+- **결정**: 시드-union(점수 융합 아님) — LightRAG가 순서·토큰버짓·dedup을 계속 소유. `bb25`(Bayesian) 등 score-fusion은 융합을 우리가 떠안아야 해서 배제.
+- **토크나이저**: 한국어는 mecab-ko 명사, 영문/Figure번호는 regex. 코퍼스 엔티티명이 대부분 영문이라 lexical 이득의 핵심은 영문 약어·고유명사.
+- **안전장치**: `query.hybrid_seed` 기본 off + fail-open(빌드 실패 시 벡터-only). `lightrag-hku==1.4.16` 핀 + 가드 테스트(`_get_node_data`가 `entities_vdb.query`로 시드하는지)로 업그레이드 드리프트를 시끄럽게 실패시킴.
+- **한계**: lexical은 동일 언어만 — 한국어 질의는 영문 인덱스에 안 붙는다(→ 4.24가 보완).
+
+### 4.24 **코퍼스 언어 키워드 확장 + 특이 jargon glossary (expand.py)**
+- **문제**: 인덱스는 문서 언어(여기선 영문)인데, 타 언어 질의(한국어)는 벡터(임베딩 간극)·BM25(동일 언어만) 양쪽에서 실패. 표준 경로(`engine.ask_events`의 `aquery`)는 `hl/ll_keywords`를 안 넘겨 LightRAG **내부 추출기가 질의 언어 그대로** 키워드를 뽑는다.
+- **해결**: flash-lite 1콜로 질의를 **코퍼스 언어 키워드**(concepts=hl, entities=ll)로 확장해 `QueryParam(hl_keywords, ll_keywords)`로 주입 — `kb_tool`이 쓰던 명시 키워드 경로 재사용. `get_keywords_from_query`가 사전 설정 키워드가 있으면 내부 LLM 추출을 스킵함을 확인.
+- **병렬화**: router와 `asyncio.gather`로 동시 실행 → 둘 다 cheap flash-lite라 추가 wall-clock ≈ 0. router가 no-retrieval/out-of-scope면 확장 결과는 버림.
+- **코퍼스 언어 자동 감지**: `vdb_entities.json` content의 지배 Unicode 스크립트로 판정(ko/en/ja/zh), config 오버라이드. "약어·고유명사 verbatim 보존" 규칙으로 혼합 언어 코퍼스도 견딤.
+- **glossary (few-shot 앵커)**: 인덱스에서 **허브 용어(청크빈도 상위) + 특이 jargon(엔티티명 토큰 IDF 상위, df 하한·노이즈 필터)** 혼합을 자동 추출해 확장 프롬프트에 주입 → LLM이 인덱스 정규 표기로 스냅. **콜드 스타트 없음**(인덱스에서 자동 파생), 선택적 수기 overlay는 additive.
+- **prefix 캐싱**: glossary를 정렬 고정해 system_prompt를 byte-stable prefix로 만들면 기존 `llm._ensure_gemini_cache`(≥4000자에서 발동)가 `cachedContents`를 생성 → 반복 호출 75% 할인. 질의는 user prompt에만 둬 prefix 불변 유지.
+- **검증(A/B)**: 한국어 질의에서 off는 `end-stopped cells`처럼 빗나가고 소문자 변형, on은 `End Cut`·`Filling-In`·`Hypercomplex Cells` 등 **인덱스 정규 표기로 스냅**. 다만 LightRAG 내부 추출기가 이미 일부 영어를 뱉어 이득은 "정밀화"에 가까움.
+- **안전장치**: `query.expand_keywords` 기본 off + 모든 단계 fail-open(확장 실패→내부 추출, glossary 실패→빈 glossary).
+
 ---
 
 ## 5. 설치 및 실행

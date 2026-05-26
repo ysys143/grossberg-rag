@@ -82,6 +82,8 @@ config.yaml      모델·경로·파서 설정의 단일 출처
 | 라우터 pre-filter | flash-lite 1콜로 scope / effort / clarification 판정. fail-open |
 | HITL 명료화 게이트 | 모호한 질문은 검색 전 되묻기. 1라운드 상한 |
 | LLM reranker | gemini-3.1-flash-lite list-wise 재정렬. `--rerank none|oneshot|batched` |
+| BM25 하이브리드 시딩 | LightRAG의 벡터-only 엔티티 시드에 BM25 lexical 시드를 union(`query.hybrid_seed`). 약어·Figure번호·고유명사 등 임베딩이 놓치는 정확매칭 복원. mecab-ko 토크나이저 |
+| 코퍼스 언어 키워드 확장 | 질의를 코퍼스 언어로 확장해 `hl/ll_keywords` 주입(`query.expand_keywords`). router와 병렬 실행, fail-open. 코퍼스 특이 jargon glossary를 prompt에 few-shot 주입(`query.expand_glossary`, Gemini prefix 캐싱) |
 | 에이전트 루프 | `--agent`: KB tool + web_search_preview tool-calling. `effort=high`시 plan-execute |
 | 대화 메모리 | append-only 인용 요약으로 멀티턴 맥락 유지. provider prompt caching 친화적 |
 | 세션 영속화 | 매 턴 자동 저장. `--session NAME` / `--resume` |
@@ -127,6 +129,8 @@ config.yaml      모델·경로·파서 설정의 단일 출처
 | `grag/agent.py` | Responses API tool-calling 루프 + 통합 스트리밍 |
 | `grag/kb_tool.py` | LightRAG KB를 OpenAI function tool로 노출 |
 | `grag/router.py` | 질의 전 분류기(flash-lite). scope / effort / clarification |
+| `grag/hybrid_seed.py` | BM25 lexical 엔티티 시드를 LightRAG 벡터 시드에 union (mecab-ko + 자체 Okapi BM25) |
+| `grag/expand.py` | 코퍼스 언어 키워드 확장 + 특이 jargon glossary 자동 추출 (prefix-cache 친화) |
 | `grag/image_gate.py` | 쿼리 시점 이미지 관련성 게이트(flash-lite). fail-closed |
 | `grag/models.py` | LightRAG 콜백 + provider 라우팅 + style prepend |
 | `grag/llm.py` | Gemini/OpenAI HTTP 클라이언트. 비스트리밍 + 스트리밍, reasoning 캡처 |
@@ -156,6 +160,11 @@ query:
   default_mode: hybrid
   inject_images: true             # 쿼리 시점 figure 재주입
   max_injected_images: 5
+  hybrid_seed: false              # BM25 lexical 엔티티 시드 union (needs python-mecab-ko)
+  hybrid_seed_top_k: 10
+  expand_keywords: false          # 질의 -> 코퍼스 언어 hl/ll 키워드 확장 후 주입
+  expand_lang: auto               # 인덱스에서 코퍼스 언어 자동 감지 (또는 en|ko|ja|zh 고정)
+  expand_glossary: true           # 코퍼스 특이 용어 glossary를 확장 프롬프트에 주입 (prefix-cached)
 
 agent:
   max_tool_rounds: 4              # tool-calling 루프 상한

@@ -256,6 +256,7 @@ class ChatSession:
         self.rag: LightRAG | None = None
         self.pending_question: str | None = None  # original Q awaiting HITL clarification
         self.corpus_lang: str = "en"  # language of the index; target for keyword expansion
+        self.glossary: str = ""       # corpus characteristic terms injected into expansion
 
     def load(self) -> int:
         """Restore history. Returns prior turn count."""
@@ -300,6 +301,13 @@ class ChatSession:
         if _cfg["query"].get("expand_keywords"):
             cl = _cfg["query"].get("expand_lang", "auto")
             self.corpus_lang = expand.detect_corpus_lang(self.working_dir) if cl == "auto" else cl
+            if _cfg["query"].get("expand_glossary"):
+                self.glossary = expand.build_glossary(
+                    self.working_dir,
+                    hub_n=int(_cfg["query"].get("glossary_hub_n", 100)),
+                    distinct_n=int(_cfg["query"].get("glossary_distinct_n", 120)),
+                    df_min=int(_cfg["query"].get("glossary_df_min", 2)),
+                )
 
     async def teardown(self):
         if self.rag is not None:
@@ -323,7 +331,8 @@ async def ask_events(session: ChatSession, question: str,
     if _cfg["query"].get("expand_keywords"):
         decision, kw = await asyncio.gather(
             router.route(question, session.history),
-            expand.expand_keywords(question, session.corpus_lang, session.history),
+            expand.expand_keywords(question, session.corpus_lang, session.history,
+                                   glossary=session.glossary),
         )
     else:
         decision = await router.route(question, session.history)

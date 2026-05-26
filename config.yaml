@@ -36,6 +36,11 @@ query:
   expand_keywords: false           # expand query -> corpus-language hl/ll keywords before retrieval
   expand_lang: auto                # auto-detect corpus language from the index, or pin: en | ko | ja | zh
   # expand_model: gemini-3.1-flash-lite   # optional; defaults to router.model
+  expand_glossary: true            # inject auto-built corpus glossary into the expansion prompt (prefix-cached)
+  glossary_hub_n: 100              # top hub terms by chunk frequency
+  glossary_distinct_n: 120         # top distinctive terms by name-token IDF
+  glossary_df_min: 2               # entity must appear in >= N chunks (drops hapax/OCR noise)
+  # glossary_overlay: grag/glossary.yaml   # optional hand-curated terms/aliases (additive)
 
 agent:
   max_tool_rounds: 4          # safety cap on tool-call iterations per query

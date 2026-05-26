@@ -443,3 +443,18 @@ class TestExpandKeywordsLive:
         assert terms, "expansion returned no keywords"
         # translated into the corpus language (English) -> at least one ASCII-latin term
         assert any(re.search(r"[A-Za-z]", t) for t in terms)
+
+
+@pytest.mark.integration
+@_needs_index
+class TestGlossaryRealCorpus:
+    """Offline against the real index (no API): glossary covers known jargon and the
+    expansion system prompt clears the Gemini prefix-cache threshold."""
+
+    def test_glossary_contains_jargon_and_is_cache_eligible(self):
+        from grag.expand import build_glossary, _system_prompt
+        terms = build_glossary(_WDIR).split("\n")
+        assert any("FACADE" in t for t in terms)
+        assert any(t == "BCS" or "Boundary Contour System" in t for t in terms)
+        assert any("Filling-In" in t for t in terms)
+        assert len(_system_prompt("en", "\n".join(terms))) >= 4000  # Gemini cache threshold
